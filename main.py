@@ -20,64 +20,8 @@ GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID")
 # --- Initialize Firestore Client -------------------------------------------
 db = firestore.Client(database="bstrong2")
 
-# --- Global Variables -------------------------------------
-TWILIO_ACCOUNT_SID = None
-TWILIO_AUTH_TOKEN = None
-TWILIO_PHONE_NUMBER = None
-DEVELOPER_PHONE_NUMBER = None
-OWNER_PHONE_NUMBERS = []
+# --- Global Constants -------------------------------------
 POS_MISC_CUSTOMER_ID = "WDSh-insBmIKBj0N22Zw6w=="
-
-# --- SMS Helper -------------------------------------------------
-def send_sms(to_phone_number, body, first_name=None, last_name=None):
-    if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER]):
-        print("Twilio credentials are not configured. Cannot send SMS.")
-        return False
-    client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-    try:
-        client.messages.create(
-            body=body,
-            from_=TWILIO_PHONE_NUMBER,
-            to=to_phone_number
-        )
-        print(f"SMS sent to {to_phone_number}")
-        return True
-    except Exception as e:
-        print(f"Failed SMS to {first_name or ''} {last_name or ''}: {e}")
-        return False
-
-# --- Notification Helpers ----------------------------------
-def notify_developer(message):
-    if not all([DEVELOPER_PHONE_NUMBER, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER]):
-        print(f"Developer notification failed: Twilio credentials not fully loaded. Message: {message}")
-        return
-    client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-    try:
-        client.messages.create(
-            body=f"B-STRONG DEV ALERT: {message}",
-            from_=TWILIO_PHONE_NUMBER,
-            to=DEVELOPER_PHONE_NUMBER
-        )
-        print(f"Developer notified: {DEVELOPER_PHONE_NUMBER}")
-    except Exception as e:
-        print(f"Failed to notify developer: {e}")
-
-def notify_owners(message):
-    if not all([OWNER_PHONE_NUMBERS, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER]):
-        print(f"Owner notification failed: Twilio credentials not fully loaded. Message: {message}")
-        return
-    client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-    for owner_number in OWNER_PHONE_NUMBERS:
-        try:
-            client.messages.create(
-                body=f"B-STRONG ALERT: {message}",
-                from_=TWILIO_PHONE_NUMBER,
-                to=owner_number
-            )
-            print(f"Owner notified: {owner_number}")
-        except Exception as e:
-            print(f"Failed to notify owner {owner_number}: {e}")
-
 
 # --- Secret Manager Helper ----------------------------------------------
 def get_secret(secret_id, version_id="latest"):
@@ -92,35 +36,27 @@ def get_secret(secret_id, version_id="latest"):
         return response.payload.data.decode("UTF-8")
     except Exception as e:
         print(f"Error accessing secret: {secret_id}. Details: {e}")
-        notify_developer(f"CRITICAL: Failed to access secret '{secret_id}'.")
+        # Removed notify_developer here to avoid infinite loops during startup
         raise e
 
+# --- Lazy Config Class (The Fix) ---------------------------------------
+class Config:
+    """
+    Fetches secrets only when requested, preventing timeout at startup.
+    """
+    _secrets = {}
 
-# --- Configuration from Secret Manager -------------------------------------
-try:
-    TWILIO_ACCOUNT_SID = get_secret("TWILIO_ACCOUNT_SID")
-    TWILIO_AUTH_TOKEN = get_secret("TWILIO_AUTH_TOKEN")
-    TWILIO_PHONE_NUMBER = get_secret("TWILIO_PHONE_NUMBER")
-    DEVELOPER_PHONE_NUMBER = get_secret("DEVELOPER_PHONE_NUMBER")
-    OWNER_PHONE_NUMBER_1 = get_secret("OWNER_PHONE_NUMBER_1")
-    OWNER_PHONE_NUMBER_2 = get_secret("OWNER_PHONE_NUMBER_2")
-    OWNER_PHONE_NUMBERS = [num for num in [OWNER_PHONE_NUMBER_1, OWNER_PHONE_NUMBER_2] if num]
-
-    VAGARO_CLIENT_ID = get_secret("VAGARO_CLIENT_ID")
-    VAGARO_CLIENT_SECRET = get_secret("VAGARO_CLIENT_SECRET")
-    BUSINESS_ID = get_secret("BUSINESS_ID")
-    REMOTELOCK_CLIENT_ID = get_secret("REMOTELOCK_CLIENT_ID")
-    REMOTELOCK_CLIENT_SECRET = get_secret("REMOTELOCK_CLIENT_SECRET")
-    TRANSACTION_TOKEN = get_secret("TRANSACTION_TOKEN")
-    FORUM_TOKEN = get_secret("FORUM_TOKEN")
-    CLEANUP_TOKEN = get_secret("CLEANUP_TOKEN")
-    LOCK_ID = get_secret("LOCK_ID")
-    TOKEN_URL = get_secret("TOKEN_URL")
-except Exception as e:
-    print(f"FATAL: Application startup failed due to a configuration error: {e}")
-    traceback.print_exc()
-    exit(1)
-
+    @classmethod
+    def get(cls, key):
+        if key in cls._secrets:
+            return cls._secrets[key]
+        try:
+            val = get_secret(key)
+            cls._secrets[key] = val
+            return val
+        except Exception as e:
+            print(f"Failed to fetch config key {key}: {e}")
+            return None
 
 # --- Global Variables ----------------------------------------------------
 remote_lock_token = None
@@ -143,6 +79,72 @@ membership_durations = {
     "day pass": timedelta(days=0)
 }
 
+# --- SMS Helper -------------------------------------------------
+def send_sms(to_phone_number, body, first_name=None, last_name=None):
+    sid = Config.get("TWILIO_ACCOUNT_SID")
+    token = Config.get("TWILIO_AUTH_TOKEN")
+    from_num = Config.get("TWILIO_PHONE_NUMBER")
+
+    if not all([sid, token, from_num]):
+        print("Twilio credentials are not configured. Cannot send SMS.")
+        return False
+    client = Client(sid, token)
+    try:
+        client.messages.create(
+            body=body,
+            from_=from_num,
+            to=to_phone_number
+        )
+        print(f"SMS sent to {to_phone_number}")
+        return True
+    except Exception as e:
+        print(f"Failed SMS to {first_name or ''} {last_name or ''}: {e}")
+        return False
+
+# --- Notification Helpers ----------------------------------
+def notify_developer(message):
+    dev_num = Config.get("DEVELOPER_PHONE_NUMBER")
+    sid = Config.get("TWILIO_ACCOUNT_SID")
+    token = Config.get("TWILIO_AUTH_TOKEN")
+    from_num = Config.get("TWILIO_PHONE_NUMBER")
+
+    if not all([dev_num, sid, token, from_num]):
+        print(f"Developer notification failed: Credentials not fully loaded. Message: {message}")
+        return
+    client = Client(sid, token)
+    try:
+        client.messages.create(
+            body=f"B-STRONG DEV ALERT: {message}",
+            from_=from_num,
+            to=dev_num
+        )
+        print(f"Developer notified: {dev_num}")
+    except Exception as e:
+        print(f"Failed to notify developer: {e}")
+
+def notify_owners(message):
+    o1 = Config.get("OWNER_PHONE_NUMBER_1")
+    o2 = Config.get("OWNER_PHONE_NUMBER_2")
+    owners = [num for num in [o1, o2] if num]
+    
+    sid = Config.get("TWILIO_ACCOUNT_SID")
+    token = Config.get("TWILIO_AUTH_TOKEN")
+    from_num = Config.get("TWILIO_PHONE_NUMBER")
+
+    if not all([owners, sid, token, from_num]):
+        print(f"Owner notification failed: Credentials not fully loaded. Message: {message}")
+        return
+    client = Client(sid, token)
+    for owner_number in owners:
+        try:
+            client.messages.create(
+                body=f"B-STRONG ALERT: {message}",
+                from_=from_num,
+                to=owner_number
+            )
+            print(f"Owner notified: {owner_number}")
+        except Exception as e:
+            print(f"Failed to notify owner {owner_number}: {e}")
 
 # --- RemoteLock OAuth ---------------------------------------------------
 def get_access_token():
@@ -150,13 +152,20 @@ def get_access_token():
     if remote_lock_token and token_expiry and datetime.utcnow() < token_expiry:
         return remote_lock_token
 
+    client_id = Config.get("REMOTELOCK_CLIENT_ID")
+    client_secret = Config.get("REMOTELOCK_CLIENT_SECRET")
+    token_url = Config.get("TOKEN_URL")
+
+    if not all([client_id, client_secret, token_url]):
+        return None
+
     payload = {
         "grant_type": "client_credentials",
-        "client_id": REMOTELOCK_CLIENT_ID,
-        "client_secret": REMOTELOCK_CLIENT_SECRET
+        "client_id": client_id,
+        "client_secret": client_secret
     }
     try:
-        resp = requests.post(TOKEN_URL, json=payload)
+        resp = requests.post(token_url, json=payload)
         resp.raise_for_status()
         data = resp.json()
         remote_lock_token = data["access_token"]
@@ -174,6 +183,12 @@ def get_vagaro_token():
     if _vagaro_cached_token and now < _vagaro_expires_at - 60:
         return _vagaro_cached_token
         
+    client_id = Config.get("VAGARO_CLIENT_ID")
+    client_secret = Config.get("VAGARO_CLIENT_SECRET")
+
+    if not all([client_id, client_secret]):
+        return None
+
     url = "https://api.vagaro.com/us03/api/v2/merchants/generate-access-token"
     headers = {
         "accept": "application/json",
@@ -181,8 +196,8 @@ def get_vagaro_token():
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     }
     payload = {
-        "clientId": VAGARO_CLIENT_ID,
-        "clientSecretKey": VAGARO_CLIENT_SECRET
+        "clientId": client_id,
+        "clientSecretKey": client_secret
     }
     
     try:
@@ -202,6 +217,11 @@ def get_vagaro_token():
 def createDoorCode(first, last, phone, membership_type):
     access_token = get_access_token()
     if not access_token:
+        return (False, None)
+
+    lock_id = Config.get("LOCK_ID")
+    if not lock_id:
+        print("Missing LOCK_ID")
         return (False, None)
 
     est = pytz.timezone("US/Eastern")
@@ -250,7 +270,7 @@ def createDoorCode(first, last, phone, membership_type):
 
         grant = {
             "attributes": { 
-                           "accessible_id": LOCK_ID, 
+                           "accessible_id": lock_id, 
                            "accessible_type": "lock", 
                            "access_schedule_id": "d18e46f1-22b4-4880-9b0b-3d1ea60441fc"
                            }
@@ -276,8 +296,10 @@ def createDoorCode(first, last, phone, membership_type):
 # --- Form Webhook Handler ----------------------------------------------
 @app.route("/webhook-form", methods=['POST'])
 def form_webhook():
+    expected_token = Config.get("FORUM_TOKEN")
     received_token = request.headers.get("X-Vagaro-Signature")
-    if received_token != FORUM_TOKEN:
+    
+    if received_token != expected_token:
         abort(403, "Invalid X-Vagaro-Signature")
 
     data = request.json
@@ -319,8 +341,10 @@ def form_webhook():
 # --- Transaction Webhook Handler ----------------------------------
 @app.route("/webhook-transaction", methods=["POST"])
 def transaction_webhook():
+    expected_token = Config.get("TRANSACTION_TOKEN")
     sig = request.headers.get("X-Vagaro-Signature")
-    if sig != TRANSACTION_TOKEN:
+    
+    if sig != expected_token:
         print(f"Bad signature received: {sig}")
         abort(403, "Forbidden: Invalid signature.")
 
@@ -458,6 +482,11 @@ def get_vagaro_customer_details(cust_id):
     if not token:
         return None
 
+    business_id = Config.get("BUSINESS_ID")
+    if not business_id:
+        print("Missing Business ID")
+        return None
+
     headers = {
         "accept": "application/json",
         "content-type": "application/json",
@@ -465,7 +494,7 @@ def get_vagaro_customer_details(cust_id):
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     }
     
-    payload = {"businessId": BUSINESS_ID, "customerId": cust_id}
+    payload = {"businessId": business_id, "customerId": cust_id}
     
     try:
         vagaro_resp = requests.post(
@@ -485,7 +514,8 @@ def get_vagaro_customer_details(cust_id):
 # --- SMS Webhook Handler for PIN Changes ----------------------
 @app.route("/webhook-sms", methods=['POST'])
 def sms_webhook():
-    validator = RequestValidator(TWILIO_AUTH_TOKEN)
+    auth_token = Config.get("TWILIO_AUTH_TOKEN")
+    validator = RequestValidator(auth_token)
     
     url = f"https://{request.headers.get('X-Forwarded-Host', request.host)}{request.full_path}"
     
@@ -557,8 +587,10 @@ def sms_webhook():
 # --- Firestore Cleanup Handler --------------------------------------
 @app.route("/cleanup-firestore", methods=['POST'])
 def cleanup_firestore():
+    cleanup_token = Config.get("CLEANUP_TOKEN")
     received_token = request.headers.get("X-Cleanup-Token")
-    if received_token != CLEANUP_TOKEN:
+    
+    if received_token != cleanup_token:
         abort(403, "Invalid cleanup token")
 
     try:
