@@ -10,9 +10,6 @@ from services import createDoorCode
 
 app = Flask(__name__)
 
-# --- GCP Project Configuration ---------------------------------------------
-GCP_PROJECT_ID = os.getenv("MGCP_PROJECT_ID")
-
 # --- Initialize Firestore Client -------------------------------------------
 db1 = firestore.Client(database="bstrong2")
 
@@ -24,8 +21,6 @@ Owner1 = Config.get("OWNER_PHONE_NUMBER_1")
 Owner2 = Config.get("OWNER_PHONE_NUMBER_2")
 remote_lock_token = None
 token_expiry = None
-_vagaro_cached_token = None
-_vagaro_expires_at = 0
 
 membership_durations = {
     "weekend warrior": timedelta(days=2),
