@@ -5,22 +5,15 @@ from services import send_sms
 from config import Config, get_vagaro_customer_details
 from google.cloud import firestore
 from twilio.request_validator import RequestValidator
-from Main.config import get_access_token, get_vagaro_token
+from Main.config import get_access_token
 from services import createDoorCode
 
 app = Flask(__name__)
 
-# --- Initialize Firestore Client -------------------------------------------
-db1 = firestore.Client(database="bstrong2")
-
-
-# --- Global Variables ----------------------------------------------------
-POS_MISC_CUSTOMER_ID = "WDSh-insBmIKBj0N22Zw6w=="
+db1 = firestore.Client(database="bstrong2") #Connection to Database
 DeveloperPhoneNumber = Config.get("DEVELOPER_PHONE_NUMBER")
 Owner1 = Config.get("OWNER_PHONE_NUMBER_1")
 Owner2 = Config.get("OWNER_PHONE_NUMBER_2")
-remote_lock_token = None
-token_expiry = None
 
 membership_durations = {
     "weekend warrior": timedelta(days=2),
@@ -42,9 +35,9 @@ membership_durations = {
 def form_webhook():
     expected_token = Config.get("FORUM_TOKEN")
     received_token = request.headers.get("X-Vagaro-Signature")
-    
     if received_token != expected_token:
         abort(403, "Invalid X-Vagaro-Signature")
+
 
     data = request.json
     if not data or "payload" not in data:
@@ -53,7 +46,7 @@ def form_webhook():
     payload = data["payload"]
     
     if payload.get("formId") != "67842fd8f276412c07c20490":
-        print(f"Ignoring form webhook for formId: {payload.get('formId')}")
+        print(f"Ignoring form webhook for formId: {payload.get('formId')}, wrong form")
         return "Not the correct form, ignoring.", 200
 
     customer_id = payload.get("customerId")
@@ -67,13 +60,14 @@ def form_webhook():
         last_name = questions[1]["answer"][0]
         phone_number_raw = questions[2]["answer"][0]
         
-        doc_ref = db1.collection('pending_customers').document(customer_id)
-        doc_ref.set({
+        Person = db1.collection('pending_customers').document(customer_id)
+        Person.set({
             'first_name': first_name,
             'last_name': last_name,
             'phone_number': phone_number_raw,
             'timestamp': firestore.SERVER_TIMESTAMP
         })
+        
         print(f"Stored raw form data for customer {customer_id} in Firestore.")
         return "Form data stored successfully", 200
 
@@ -101,13 +95,13 @@ def transaction_webhook():
     customer_id = payload.get("customerId")
 
     print(f"Received transaction: {item_sold} for customerId: '[{customer_id}]'")
-    if customer_id or customer_id.strip() == POS_MISC_CUSTOMER_ID:
+    if customer_id or customer_id.strip() == "WDSh-insBmIKBj0N22Zw6w==": #CustomerID of the MISC person that is used for item sales
         print("Ignoring transaction for POS Miscellaneous account.")
         return "POS Miscellaneous transaction ignored", 200
 
     purchase_type = payload.get("purchaseType")
     is_membership = purchase_type == "Membership"
-    is_class_day_pass = purchase_type == "Class" and "day pass" in item_sold
+    is_class_day_pass = purchase_type == "Class" and "day pass (not a class) - 4am-10pm for one individual, for one calendar day." in item_sold
     is_package_day_pass = purchase_type == "Package" and item_sold == "day pass"
 
     if not (is_membership or is_class_day_pass or is_package_day_pass):
@@ -329,12 +323,7 @@ def cleanup_firestore():
         send_sms(DeveloperPhoneNumber, f"Firestore cleanup job failed: {e}")
         return "Error during cleanup", 500
 
-# --- Health Check ----------------------------------------------------------
-@app.route("/health", methods=["GET"])
-def health():
-    return "OK", 200
 
-# --- Main Execution -----------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port, debug=False)
