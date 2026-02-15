@@ -56,9 +56,13 @@ def form_webhook():
 
     try:
         questions = payload["questionsAndAnswers"]
-        first_name = questions[0]["answer"][0]
-        last_name = questions[1]["answer"][0]
-        phone_number_raw = questions[2]["answer"][0]
+        Person = { 
+            'first_name' : questions[0]["answer"][0], 
+            'last_name' : questions[1]["answer"][0],
+            'phone_number_raw':questions[2]["answer"][0]
+        }
+
+        addToDataBase(Person['first_name'], Person['last_name'], Person['phone_number_raw'])
         
         Person = db1.collection('pending_customers').document(customer_id)
         Person.set({
@@ -67,7 +71,7 @@ def form_webhook():
             'phone_number': phone_number_raw,
             'timestamp': firestore.SERVER_TIMESTAMP
         })
-        
+
         print(f"Stored raw form data for customer {customer_id} in Firestore.")
         return "Form data stored successfully", 200
 

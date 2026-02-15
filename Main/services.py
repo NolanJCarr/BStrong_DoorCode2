@@ -111,3 +111,5 @@ def createDoorCode(first, last, phone, membership_type):
     
     sms_sent = send_sms(phone, sms_body, first, last)
     return (sms_sent, guest_id)
+
+def addToDataBase()
