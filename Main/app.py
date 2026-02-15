@@ -1,19 +1,19 @@
 import os, requests, re, pytz, phonenumbers
 from flask import Flask, request, abort
 from datetime import datetime, timedelta
-from services import send_sms
+from services import send_sms, addToDataBase
 from config import Config, get_vagaro_customer_details
 from google.cloud import firestore
 from twilio.request_validator import RequestValidator
 from Main.config import get_access_token
-from services import createDoorCode
+from services import createDoorCode, DataBase
 
 app = Flask(__name__)
 
-db1 = firestore.Client(database="bstrong2") #Connection to Database
 DeveloperPhoneNumber = Config.get("DEVELOPER_PHONE_NUMBER")
 Owner1 = Config.get("OWNER_PHONE_NUMBER_1")
 Owner2 = Config.get("OWNER_PHONE_NUMBER_2")
+dataBase = DataBase() #Database helper
 
 membership_durations = {
     "weekend warrior": timedelta(days=2),
@@ -59,21 +59,10 @@ def form_webhook():
         Person = { 
             'first_name' : questions[0]["answer"][0], 
             'last_name' : questions[1]["answer"][0],
-            'phone_number_raw':questions[2]["answer"][0]
-        }
-
-        addToDataBase(Person['first_name'], Person['last_name'], Person['phone_number_raw'])
-        
-        Person = db1.collection('pending_customers').document(customer_id)
-        Person.set({
-            'first_name': first_name,
-            'last_name': last_name,
-            'phone_number': phone_number_raw,
+            'phone_number': questions[2]["answer"][0],
             'timestamp': firestore.SERVER_TIMESTAMP
-        })
-
-        print(f"Stored raw form data for customer {customer_id} in Firestore.")
-        return "Form data stored successfully", 200
+        }
+        return addToDataBase(collection='pending_customers', key=customer_id, data=Person)
 
     except Exception as e:
         print(f"Error processing form webhook for customer {customer_id}: {e}")
@@ -116,12 +105,10 @@ def transaction_webhook():
     if not unique_id:
         unique_id = payload.get("transactionId")
 
-    transaction_ref = db1.collection('processed_transactions').document(unique_id)
-    if transaction_ref.get().exists:
-        print(f"Duplicate transaction item ignored: {unique_id}")
-        return "Transaction item already processed", 200
+    dataBase.add(unique_id, 'processed_transactions')
     
-    transaction_ref.set({'timestamp': firestore.SERVER_TIMESTAMP})
+    if not (dataBase.checkIfExists('processed_transactions', unique_id)):
+        dataBase.add(unique_id, 'processed_transactions', {'timestamp': firestore.SERVER_TIMESTAMP})
 
     if not customer_id:
         send_sms(DeveloperPhoneNumber, "Received transaction webhook without a customerId.")
@@ -133,11 +120,10 @@ def transaction_webhook():
     phone_is_valid = False
 
     try:
-        doc_ref = db1.collection('pending_customers').document(customer_id)
-        doc = doc_ref.get()
-        if doc.exists:
+        data = dataBase.getData('pending_customers', customer_id)
+        if data.exists:
             print(f"Found pending form data for customer {customer_id} in Firestore.")
-            customer_data = doc.to_dict()
+            customer_data = data.to_dict()
             first = customer_data.get('first_name')
             last = customer_data.get('last_name')
             phone_raw_from_firestore = customer_data.get('phone_number')
@@ -153,7 +139,7 @@ def transaction_webhook():
             except Exception as e:
                 print(f"Error parsing phone from Firestore: {e}. Will use API for phone number.")
 
-            doc_ref.delete()
+            dataBase.delete('pending_customers', customer_id)
         else:
             print(f"No pending form data for customer {customer_id}. Using API fallback.")
     except Exception as e:
@@ -196,27 +182,27 @@ def transaction_webhook():
     print(f"Processing purchase for {first} {last} ({item_sold})")
     success, guest_id = createDoorCode(first, last, phone, item_sold)
     
+    
     if success:
         is_day_pass = "day pass" in item_sold
         if not is_day_pass:
             try:
-                ticket_ref = db1.collection('pin_change_tickets').document(phone)
-                ticket_ref.set({
-                    'remote_lock_id': guest_id,
-                    'timestamp': firestore.SERVER_TIMESTAMP
-                })
+                dataBase.add('pin_change_tickets', phone, {'remote_lock_id': guest_id, 'timestamp': firestore.SERVER_TIMESTAMP})
                 print(f"Created PIN change ticket for {phone}")
             except Exception as e:
                 print(f"Failed to create PIN change ticket for {phone}: {e}")
                 send_sms(DeveloperPhoneNumber, f"Failed to create PIN ticket for {phone}: {e}")
         return "Door code created successfully", 200
+    
     else:
         send_sms(Owner1, f"{first} {last} didn't get a door code.", Owner2)
         return "Failed to create door code", 500
 
+
+
 # --- SMS Webhook Handler for PIN Changes ----------------------
 @app.route("/webhook-sms", methods=['POST'])
-def sms_webhook():
+def smsPinChanges():
     auth_token = Config.get("TWILIO_AUTH_TOKEN")
     validator = RequestValidator(auth_token)
     
@@ -233,8 +219,7 @@ def sms_webhook():
     from_number = request.form.get('From')
     body = request.form.get('Body', '').strip()
 
-    ticket_ref = db1.collection('pin_change_tickets').document(from_number)
-    ticket = ticket_ref.get()
+    ticket = dataBase.get('pin_change_tickets', from_number)
 
     if not ticket.exists:
         print(f"No PIN change ticket found for {from_number}. Ignoring.")
@@ -246,7 +231,7 @@ def sms_webhook():
 
     if datetime.now(pytz.utc) > (timestamp + timedelta(hours=48)):
         send_sms(from_number, "Sorry, the 48-hour window for changing your PIN has expired.")
-        ticket_ref.delete()
+        dataBase.delete('pin_change_tickets', from_number)
         return "Ticket expired.", 200
 
     cleaned_pin = body.replace('#', '')
@@ -271,13 +256,16 @@ def sms_webhook():
         response = requests.put(update_url, json=payload, headers=headers)
         if response.status_code == 200:
             send_sms(from_number, f"Door code successfully set to {cleaned_pin}#")
-            ticket_ref.delete()
+            dataBase.delete('pin_change_tickets', from_number)
             return "PIN updated.", 200
+        
         elif response.status_code == 422:
             send_sms(from_number, "Sorry, that code is already in use. Please try again.")
             return "PIN taken.", 200
+        
         else:
             response.raise_for_status()
+    
     except requests.exceptions.RequestException as e:
         print(f"Failed to update PIN for {from_number}: {e}")
         send_sms(DeveloperPhoneNumber, f"RemoteLock API error on PIN update for {from_number}: {e.response.text if e.response else e}")
@@ -286,7 +274,8 @@ def sms_webhook():
     
     return "OK", 200
 
-# --- Firestore Cleanup Handler --------------------------------------
+
+
 @app.route("/cleanup-firestore", methods=['POST'])
 def cleanup_firestore():
     cleanup_token = Config.get("CLEANUP_TOKEN")
@@ -296,27 +285,14 @@ def cleanup_firestore():
         abort(403, "Invalid cleanup token")
 
     try:
-        two_days_ago = datetime.now(pytz.utc) - timedelta(days=2)
-        
-        docs_pending = db1.collection('pending_customers').where('timestamp', '<', two_days_ago).stream()
-        docs_tickets = db1.collection('pin_change_tickets').where('timestamp', '<', two_days_ago).stream()
-        docs_transactions = db1.collection('processed_transactions').where('timestamp', '<', two_days_ago).stream()
-
+        all_tickets = dataBase.getAllOldDocs()
         deleted_count = 0
-        batch = db1.batch()
+        batch = dataBase.batch()
         
-        for doc in docs_pending:
+        for doc in all_tickets:
             batch.delete(doc.reference)
             deleted_count += 1
         
-        for doc in docs_tickets:
-            batch.delete(doc.reference)
-            deleted_count += 1
-        
-        for doc in docs_transactions:
-            batch.delete(doc.reference)
-            deleted_count += 1
-
         batch.commit()
 
         print(f"Firestore cleanup successful. Deleted {deleted_count} old documents.")

@@ -3,6 +3,50 @@ from twilio.rest import Client
 from config import get_remotelock_token
 from app import Config, membership_durations, DeveloperPhoneNumber 
 from datetime import datetime, timedelta
+from google.cloud import firestore
+
+
+class DataBase:
+    def __init__(self):
+        self.database = firestore.Client(database="bstrong2")
+
+    def checkIfExists(self, collection, key):
+        reference = self.database.collection(collection).document(key)
+        if reference.get().exists:
+            print(f"Duplicate transaction item ignored: {key}")
+            return True 
+        else:
+            return False
+
+
+    def add(self, collection, key, data=None):
+        reference = self.database.collection(collection).document(key)
+        if data:
+            reference.set(data)
+        return f"successfully added key: {key} to the collection: {collection}. With the data: {data}", 200
+    
+    def getData(self, collection, key):
+        reference = self.database.collection(collection).document(key)
+        return reference.get()
+
+    def delete(self, collection, key):
+        reference = self.database.collection(collection).document(key)
+        reference.delete()
+
+    def getAllOldDocs(self):
+        two_days_ago = datetime.now(pytz.utc) - timedelta(days=2)
+
+        docs_pending = self.database.collection('pending_customers').where('timestamp', '<', two_days_ago).stream()
+        docs_tickets = self.database.collection('pin_change_tickets').where('timestamp', '<', two_days_ago).stream()
+        docs_transactions = self.database.collection('processed_transactions').where('timestamp', '<', two_days_ago).stream()
+        return docs_pending + docs_tickets + docs_transactions
+
+    def getBatch(self):
+        return self.database.batch()
+    
+
+
+
 
 
 def send_sms(to_phone_number, body, to_phone_number_2 = None, first_name=None, last_name=None):
@@ -112,4 +156,4 @@ def createDoorCode(first, last, phone, membership_type):
     sms_sent = send_sms(phone, sms_body, first, last)
     return (sms_sent, guest_id)
 
-def addToDataBase()
+
