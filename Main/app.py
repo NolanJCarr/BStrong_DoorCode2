@@ -1,12 +1,11 @@
 import os, requests, re, pytz, phonenumbers
 from flask import Flask, request, abort
 from datetime import datetime, timedelta
-from services import send_sms, addToDataBase
+from services import send_sms, addToDataBase, createDoorCode, DataBase
 from config import Config, get_vagaro_customer_details
 from google.cloud import firestore
 from twilio.request_validator import RequestValidator
 from Main.config import get_access_token
-from services import createDoorCode, DataBase
 
 app = Flask(__name__)
 
@@ -199,7 +198,6 @@ def transaction_webhook():
         return "Failed to create door code", 500
 
 
-
 # --- SMS Webhook Handler for PIN Changes ----------------------
 @app.route("/webhook-sms", methods=['POST'])
 def smsPinChanges():
@@ -275,7 +273,6 @@ def smsPinChanges():
     return "OK", 200
 
 
-
 @app.route("/cleanup-firestore", methods=['POST'])
 def cleanup_firestore():
     cleanup_token = Config.get("CLEANUP_TOKEN")
@@ -302,7 +299,6 @@ def cleanup_firestore():
         print(f"Error during Firestore cleanup: {e}")
         send_sms(DeveloperPhoneNumber, f"Firestore cleanup job failed: {e}")
         return "Error during cleanup", 500
-
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
