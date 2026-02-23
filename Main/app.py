@@ -62,7 +62,7 @@ def form_webhook():
             'phone_number': questions[2]["answer"][0],
             'timestamp': firestore.SERVER_TIMESTAMP
         }
-        return addToDataBase(collection='pending_customers', key=customer_id, data=Person)
+        DataBase.add(collection='pending_customers', key=customer_id, data=Person)
 
     except Exception as e:
         print(f"Error processing form webhook for customer {customer_id}: {e}")
