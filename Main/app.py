@@ -1,7 +1,7 @@
 import os, requests, re, pytz, phonenumbers
 from flask import Flask, request, abort
 from datetime import datetime, timedelta
-from services import send_sms, addToDataBase, createDoorCode, DataBase
+from services import send_sms, createDoorCode, DataBase, phoneNumberFixer
 from config import Config, get_vagaro_customer_details
 from google.cloud import firestore
 from twilio.request_validator import RequestValidator
@@ -12,7 +12,8 @@ app = Flask(__name__)
 DeveloperPhoneNumber = Config.get("DEVELOPER_PHONE_NUMBER")
 Owner1 = Config.get("OWNER_PHONE_NUMBER_1")
 Owner2 = Config.get("OWNER_PHONE_NUMBER_2")
-dataBase = DataBase() #Database helper
+miscCustomerID = Config.get("MISC_PERSON_CUSTID")
+dataBase = DataBase()
 
 membership_durations = {
     "weekend warrior": timedelta(days=2),
@@ -87,7 +88,7 @@ def transaction_webhook():
     customer_id = payload.get("customerId")
 
     print(f"Received transaction: {item_sold} for customerId: '[{customer_id}]'")
-    if customer_id or customer_id.strip() == "WDSh-insBmIKBj0N22Zw6w==": #CustomerID of the MISC person that is used for item sales
+    if customer_id or customer_id.strip() == miscCustomerID:
         print("Ignoring transaction for POS Miscellaneous account.")
         return "POS Miscellaneous transaction ignored", 200
 
@@ -100,18 +101,17 @@ def transaction_webhook():
         print(f"Ignoring non-membership/day pass purchase: Type='{purchase_type}', Item='{item_sold}'")
         return "Not a relevant purchase type", 200
 
+
     unique_id = payload.get("userPaymentId")
     if not unique_id:
         unique_id = payload.get("transactionId")
+
 
     dataBase.add(unique_id, 'processed_transactions')
     
     if not (dataBase.checkIfExists('processed_transactions', unique_id)):
         dataBase.add(unique_id, 'processed_transactions', {'timestamp': firestore.SERVER_TIMESTAMP})
 
-    if not customer_id:
-        send_sms(DeveloperPhoneNumber, "Received transaction webhook without a customerId.")
-        return "Missing customerId", 400
 
     first = None
     last = None
@@ -128,26 +128,28 @@ def transaction_webhook():
             phone_raw_from_firestore = customer_data.get('phone_number')
             
             try:
-                parsed_phone = phonenumbers.parse(phone_raw_from_firestore, "US")
-                if phonenumbers.is_valid_number(parsed_phone):
-                    phone = phonenumbers.format_number(parsed_phone, phonenumbers.PhoneNumberFormat.E164)
+                phone = phoneNumberFixer(phone_raw_from_firestore)
+                if phone.get('valid'):
                     phone_is_valid = True
-                    print(f"Valid phone number '{phone}' found in Firestore.")
-                else:
-                    print(f"Invalid phone number '{phone_raw_from_firestore}' in Firestore. Will use API for phone number.")
+                    print(f"Valid phone number '{phone.get('number')}' found in Firestore.")
+
             except Exception as e:
                 print(f"Error parsing phone from Firestore: {e}. Will use API for phone number.")
-
+            
             dataBase.delete('pending_customers', customer_id)
+        
         else:
             print(f"No pending form data for customer {customer_id}. Using API fallback.")
+    
+    
     except Exception as e:
         print(f"Error accessing Firestore for customer {customer_id}: {e}. Using API fallback.")
         send_sms(DeveloperPhoneNumber, f"Firestore access error for {customer_id}: {e}")
 
+    
     if not phone_is_valid:
         try:
-            print(f"Executing API fallback for customer {customer_id}.")
+            print(f"Executing API fallback for customer {customer_id}. with name: ({first}) ({last})")
             cust = get_vagaro_customer_details(customer_id)
             if not cust:
                 raise ValueError("Customer data could not be retrieved from API.")
@@ -160,13 +162,12 @@ def transaction_webhook():
             phone_raw = cust.get("mobilePhone")
 
             if not phone_raw:
+                print(f"No valid phone numbers from form or inside Vagaro")
                 raise ValueError("No mobile phone found in Vagaro profile.")
 
-            parsed_phone = phonenumbers.parse(phone_raw, "US")
-            if not phonenumbers.is_valid_number(parsed_phone):
-                raise ValueError(f"Invalid phone number from API: {phone_raw}")
-            phone = phonenumbers.format_number(parsed_phone, phonenumbers.PhoneNumberFormat.E164)
-            print(f"Using valid phone number '{phone}' from API.")
+            result = phoneNumberFixer(phone_raw)
+            if result.get('valid'):
+                print(f"Using valid phone number '{phone}' from API.")
 
         except Exception as e:
             print(f"Failed to get customer details via API fallback: {e}")
@@ -178,7 +179,7 @@ def transaction_webhook():
         send_sms(Owner1, f"{first or 'Unknown'} {last or 'Customer'} didn't get a door code", Owner2)
         return "Incomplete customer data", 500
 
-    print(f"Processing purchase for {first} {last} ({item_sold})")
+    print(f"Processing purchase for {first} {last}: ({item_sold})")
     success, guest_id = createDoorCode(first, last, phone, item_sold)
     
     
@@ -187,7 +188,7 @@ def transaction_webhook():
         if not is_day_pass:
             try:
                 dataBase.add('pin_change_tickets', phone, {'remote_lock_id': guest_id, 'timestamp': firestore.SERVER_TIMESTAMP})
-                print(f"Created PIN change ticket for {phone}")
+                print(f"Created PIN change ticket for {first} {last} with number: {phone}")
             except Exception as e:
                 print(f"Failed to create PIN change ticket for {phone}: {e}")
                 send_sms(DeveloperPhoneNumber, f"Failed to create PIN ticket for {phone}: {e}")
@@ -196,6 +197,7 @@ def transaction_webhook():
     else:
         send_sms(Owner1, f"{first} {last} didn't get a door code.", Owner2)
         return "Failed to create door code", 500
+
 
 
 # --- SMS Webhook Handler for PIN Changes ----------------------
@@ -273,6 +275,7 @@ def smsPinChanges():
     return "OK", 200
 
 
+
 @app.route("/cleanup-firestore", methods=['POST'])
 def cleanup_firestore():
     cleanup_token = Config.get("CLEANUP_TOKEN")
@@ -299,6 +302,7 @@ def cleanup_firestore():
         print(f"Error during Firestore cleanup: {e}")
         send_sms(DeveloperPhoneNumber, f"Firestore cleanup job failed: {e}")
         return "Error during cleanup", 500
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))

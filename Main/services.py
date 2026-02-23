@@ -1,4 +1,4 @@
-import pytz, requests
+import pytz, requests, phonenumbers
 from twilio.rest import Client
 from config import get_remotelock_token
 from app import Config, membership_durations, DeveloperPhoneNumber 
@@ -44,8 +44,6 @@ class DataBase:
     def getBatch(self):
         return self.database.batch()
     
-
-
 
 
 
@@ -156,4 +154,20 @@ def createDoorCode(first, last, phone, membership_type):
     sms_sent = send_sms(phone, sms_body, first, last)
     return (sms_sent, guest_id)
 
+
+def phoneNumberFixer(raw_phone_number):
+    number = None
+    if raw_phone_number.contains("+"):
+        international = phonenumbers.parse(raw_phone_number, None)
+        if phonenumbers.is_valid_number(international):
+            number = phonenumbers.format_number(international, phonenumbers.PhoneNumberFormat.E164)
+            return {'valid': True, 'number':number}   
+    else:
+        US_number = phonenumbers.parse(raw_phone_number, "US")
+        if phonenumbers.is_valid_number(US_number):
+            number = phonenumbers.format_number(US_number, phonenumbers.PhoneNumberFormat.E164)
+            return {'valid': True, 'number':number} 
+    print(f"Invalid phone number '{raw_phone_number}' in Firestore. Will use API for phone number.")
+    return {'valid': False, 'number':raw_phone_number}
+        
 
