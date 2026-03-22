@@ -1,12 +1,9 @@
 from google.cloud import secretmanager
-from app import DeveloperPhoneNumber
 from datetime import timedelta, datetime
-from services import send_sms
 import os, requests, time
 
 
 GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID")
-
 class Config:
     _secrets = {}
 
@@ -38,8 +35,8 @@ def get_secret(secret_id, version_id="latest"):
         raise e
 
 
-def get_vagaro_customer_details(cust_id):
-    token = get_vagaro_token()
+def get_vagaro_customer_details(cust_id, database):
+    token = get_vagaro_token(database)
     if not token:
         return None
 
@@ -69,14 +66,19 @@ def get_vagaro_customer_details(cust_id):
         return vagaro_resp.json().get("data")
     
     except requests.exceptions.RequestException as e:
+        from services import send_sms
         send_sms(DeveloperPhoneNumber, f"Vagaro API error for customer {cust_id}: {e.response.text if e.response else e}")
         return None
     
 
-def get_remotelock_token():
-    global remote_lock_token, token_expiry
-    if remote_lock_token and token_expiry and datetime.utcnow() < token_expiry:
-        return remote_lock_token
+def get_remotelock_token(db_helper):
+    token_doc = db_helper.getData('system_auth', 'remotelock_token')
+    now = time.time()
+
+    if token_doc.exists:
+        cached = token_doc.to_dict()
+        if now < (cached.get('expires_at', 0) - 300):
+            return cached.get('access_token')
 
     client_id = Config.get("REMOTELOCK_CLIENT_ID")
     client_secret = Config.get("REMOTELOCK_CLIENT_SECRET")
@@ -91,50 +93,69 @@ def get_remotelock_token():
         "client_secret": client_secret
     }
     try:
-        resp = requests.post(token_url, json=payload)
+        resp = requests.post(token_url, json=payload, timeout=10)
         resp.raise_for_status()
         data = resp.json()
-        remote_lock_token = data["access_token"]
-        token_expiry = datetime.utcnow() + timedelta(seconds=data["expires_in"] - 60)
-        return remote_lock_token
+        new_token = data["access_token"]
+        duration = data.get("expires_in", 3600) 
+        db_helper.add('system_auth', 'remotelock_token', {
+            'access_token': new_token,
+            'expires_at': now + duration
+        })
+        print("Successfully refreshed and stored new RemoteLock token.")
+        return new_token
+    
     except requests.exceptions.RequestException as e:
+        from services import send_sms
+        DeveloperPhoneNumber = Config.get("DEVELOPER_PHONE_NUMBER")
         print(f"Error getting RemoteLock token: {e}")
         send_sms(DeveloperPhoneNumber, f"Could not refresh RemoteLock token: {e}")
         return None
 
 
-def get_vagaro_token():
-    global _vagaro_cached_token, _vagaro_expires_at
+def get_vagaro_token(db_helper):
+    cached = db_helper.getData('system_auth', 'vagaro_token')
     now = time.time()
-    if _vagaro_cached_token and now < _vagaro_expires_at - 60:
-        return _vagaro_cached_token
-        
-    client_id = Config.get("VAGARO_CLIENT_ID")
-    client_secret = Config.get("VAGARO_CLIENT_SECRET")
 
-    if not all([client_id, client_secret]):
-        return None
-
+    if cached.exists:
+        data = cached.to_dict()
+        # Use a 5-minute (300s) safety buffer
+        if now < (data.get('expires_at', 0) - 300):
+            return data.get('access_token')
+       
     url = "https://api.vagaro.com/us03/api/v2/merchants/generate-access-token"
+    payload = {
+        "clientId": Config.get("VAGARO_CLIENT_ID"),
+        "clientSecretKey": Config.get("VAGARO_CLIENT_SECRET")
+    }
     headers = {
         "accept": "application/json",
         "content-type": "application/json",
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-    }
-    payload = {
-        "clientId": client_id,
-        "clientSecretKey": client_secret
     }
     
     try:
         r = requests.post(url, json=payload, headers=headers)
         r.raise_for_status()
         data = r.json()["data"]
-        _vagaro_cached_token = data["access_token"]
-        _vagaro_expires_at = now + data.get("expires_in", 3600)
-        return _vagaro_cached_token
+        vagaro_cached_token = data["access_token"]
+        duration = data.get("expires_in", 3600)
+
+        db_helper.add('system_auth', 'vagaro_token', {
+            'access_token': vagaro_cached_token,
+            'expires_at': now + duration
+        })
+
+        print("Successfully refreshed and stored new Vagaro token.")
+        return vagaro_cached_token
     
     except requests.exceptions.RequestException as e:
-        print(f"Error getting Vagaro token: {e}")
-        send_sms(DeveloperPhoneNumber, f"Could not refresh Vagaro token: {e.response.text if e.response else e}")
+        from services import send_sms
+        DeveloperPhoneNumber = Config.get("DEVELOPER_PHONE_NUMBER")
+        
+        error_detail = e.response.text if hasattr(e, 'response') and e.response else str(e)
+        print(f"Error getting Vagaro token: {error_detail}")
+        
+        if DeveloperPhoneNumber:
+            send_sms(DeveloperPhoneNumber, f"Vagaro Token Refresh Failed: {error_detail[:100]}")
         return None

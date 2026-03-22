@@ -66,7 +66,7 @@ def form_webhook():
 
     except Exception as e:
         print(f"Error processing form webhook for customer {customer_id}: {e}")
-        send_sms(DeveloperPhoneNumber, f"Failed to process form for customer {customer_id}: {e}")
+        send_sms(DeveloperPhoneNumber,Config, f"Failed to process form for customer {customer_id}: {e}")
         return "Error processing form data", 500
 
 # --- Transaction Webhook Handler ----------------------------------
@@ -144,13 +144,13 @@ def transaction_webhook():
     
     except Exception as e:
         print(f"Error accessing Firestore for customer {customer_id}: {e}. Using API fallback.")
-        send_sms(DeveloperPhoneNumber, f"Firestore access error for {customer_id}: {e}")
+        send_sms(DeveloperPhoneNumber, Config, f"Firestore access error for {customer_id}: {e}")
 
     
     if not phone_is_valid:
         try:
             print(f"Executing API fallback for customer {customer_id}. with name: ({first}) ({last})")
-            cust = get_vagaro_customer_details(customer_id)
+            cust = get_vagaro_customer_details(customer_id, DataBase)
             if not cust:
                 raise ValueError("Customer data could not be retrieved from API.")
             
@@ -172,15 +172,15 @@ def transaction_webhook():
         except Exception as e:
             print(f"Failed to get customer details via API fallback: {e}")
             customer_name = f"{first or 'Unknown'} {last or 'Customer'}"
-            send_sms(Owner1, f"Failed to send code to {customer_name}", Owner2)
+            send_sms(Owner1, Config,  f"Failed to send code to {customer_name}", to_phone_number_2=Owner2)
             return "Error fetching customer data", 500
 
     if not (first and last and phone):
-        send_sms(Owner1, f"{first or 'Unknown'} {last or 'Customer'} didn't get a door code", Owner2)
+        send_sms(Owner1, Config,  f"{first or 'Unknown'} {last or 'Customer'} didn't get a door code", to_phone_number_2=Owner2)
         return "Incomplete customer data", 500
 
     print(f"Processing purchase for {first} {last}: ({item_sold})")
-    success, guest_id = createDoorCode(first, last, phone, item_sold)
+    success, guest_id = createDoorCode(first, last, phone, item_sold, DataBase, membership_durations, Config)
     
     
     if success:
@@ -191,11 +191,11 @@ def transaction_webhook():
                 print(f"Created PIN change ticket for {first} {last} with number: {phone}")
             except Exception as e:
                 print(f"Failed to create PIN change ticket for {phone}: {e}")
-                send_sms(DeveloperPhoneNumber, f"Failed to create PIN ticket for {phone}: {e}")
+                send_sms(DeveloperPhoneNumber, Config,  f"Failed to create PIN ticket for {phone}: {e}")
         return "Door code created successfully", 200
     
     else:
-        send_sms(Owner1, f"{first} {last} didn't get a door code.", Owner2)
+        send_sms(Owner1, Config,  f"{first} {last} didn't get a door code.", to_phone_number_2=Owner2)
         return "Failed to create door code", 500
 
 
@@ -230,18 +230,18 @@ def smsPinChanges():
     timestamp = ticket_data.get('timestamp')
 
     if datetime.now(pytz.utc) > (timestamp + timedelta(hours=48)):
-        send_sms(from_number, "Sorry, the 48-hour window for changing your PIN has expired.")
+        send_sms(from_number, Config, "Sorry, the 48-hour window for changing your PIN has expired.")
         dataBase.delete('pin_change_tickets', from_number)
         return "Ticket expired.", 200
 
     cleaned_pin = body.replace('#', '')
     if not re.match(r'^\d{4,5}$', cleaned_pin):
-        send_sms(from_number, "Invalid reponse. Please try again with just the 4 or 5 numbers you'd like for your door code.")
+        send_sms(from_number, Config, "Invalid reponse. Please try again with just the 4 or 5 numbers you'd like for your door code.")
         return "Invalid PIN format.", 200
 
     access_token = get_access_token()
     if not access_token:
-        send_sms(DeveloperPhoneNumber, f"Could not get RemoteLock token for PIN change for {from_number}")
+        send_sms(DeveloperPhoneNumber, Config, f"Could not get RemoteLock token for PIN change for {from_number}")
         return "Internal error.", 500
 
     update_url = f"https://api.remotelock.com/access_persons/{remote_lock_id}"
@@ -255,12 +255,12 @@ def smsPinChanges():
     try:
         response = requests.put(update_url, json=payload, headers=headers)
         if response.status_code == 200:
-            send_sms(from_number, f"Door code successfully set to {cleaned_pin}#")
+            send_sms(from_number, Config, f"Door code successfully set to {cleaned_pin}#")
             dataBase.delete('pin_change_tickets', from_number)
             return "PIN updated.", 200
         
         elif response.status_code == 422:
-            send_sms(from_number, "Sorry, that code is already in use. Please try again.")
+            send_sms(from_number, Config, "Sorry, that code is already in use. Please try again.")
             return "PIN taken.", 200
         
         else:
@@ -268,8 +268,8 @@ def smsPinChanges():
     
     except requests.exceptions.RequestException as e:
         print(f"Failed to update PIN for {from_number}: {e}")
-        send_sms(DeveloperPhoneNumber, f"RemoteLock API error on PIN update for {from_number}: {e.response.text if e.response else e}")
-        send_sms(from_number, "Sorry, an error occurred while updating your code. Please contact staff.")
+        send_sms(DeveloperPhoneNumber, Config, f"RemoteLock API error on PIN update for {from_number}: {e.response.text if e.response else e}")
+        send_sms(from_number, Config, "Sorry, an error occurred while updating your code. Please contact staff.")
         return "RemoteLock error.", 500
     
     return "OK", 200
@@ -300,7 +300,7 @@ def cleanup_firestore():
 
     except Exception as e:
         print(f"Error during Firestore cleanup: {e}")
-        send_sms(DeveloperPhoneNumber, f"Firestore cleanup job failed: {e}")
+        send_sms(DeveloperPhoneNumber, Config, f"Firestore cleanup job failed: {e}")
         return "Error during cleanup", 500
 
 

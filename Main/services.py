@@ -1,7 +1,6 @@
 import pytz, requests, phonenumbers
 from twilio.rest import Client
 from config import get_remotelock_token
-from app import Config, membership_durations, DeveloperPhoneNumber 
 from datetime import datetime, timedelta
 from google.cloud import firestore
 
@@ -44,10 +43,18 @@ class DataBase:
     def getBatch(self):
         return self.database.batch()
     
+    def get_token_cache(self, service_name):
+        ref = self.database.collection('system_auth').document(service_name).get()
+        return ref.to_dict() if ref.exists else None
+    
+    def set_token_cache(self, service_name, token, expires_at):
+        self.database.collection('system_auth').document(service_name).set({
+            'token': token,
+            'expires_at': expires_at
+        })
 
 
-
-def send_sms(to_phone_number, body, to_phone_number_2 = None, first_name=None, last_name=None):
+def send_sms(to_phone_number, Config, body, to_phone_number_2 = None, first_name=None, last_name=None):
     sid = Config.get("TWILIO_ACCOUNT_SID")
     token = Config.get("TWILIO_AUTH_TOKEN")
     from_num = Config.get("TWILIO_PHONE_NUMBER")
@@ -75,8 +82,8 @@ def send_sms(to_phone_number, body, to_phone_number_2 = None, first_name=None, l
         return False
 
 
-def createDoorCode(first, last, phone, membership_type):
-    access_token = get_remotelock_token()
+def createDoorCode(first, last, phone, membership_type, dBase, membership_durations, Config):
+    access_token = get_remotelock_token(dBase)
     if not access_token:
         return (False, None)
 
@@ -141,7 +148,8 @@ def createDoorCode(first, last, phone, membership_type):
 
     except requests.exceptions.RequestException as e:
         print(f"RemoteLock API error: {e}")
-        send_sms(DeveloperPhoneNumber, f"RemoteLock API error for {first} {last}: {e.response.text if e.response else e}")
+        DeveloperPhoneNumber = Config.get("DEVELOPER_PHONE_NUMBER")
+        send_sms(DeveloperPhoneNumber, Config, f"RemoteLock API error for {first} {last}: {e.response.text if e.response else e}")
         return (False, None)
 
     exp_date = end_utc.astimezone(est).strftime('%Y-%m-%d')
@@ -151,13 +159,13 @@ def createDoorCode(first, last, phone, membership_type):
     else:
         sms_body = f"Your B-STRONG door code is {pin}#. Be sure to hit the # after the numbers. If you'd like to change your door code please respond to this text with the 4 or 5 digits to set it. Your code will expire {exp_date} at 10:00 pm. Access hours are 4am-10pm. Busiest times are 8am-11am, so if you arrive at 9, plan for it to be busy. Please don't share your code with others or let anyone else in. Questions? Text Craig at 774-255-0465 or Heather at 508-685-8888. Enjoy your workout!"
     
-    sms_sent = send_sms(phone, sms_body, first, last)
+    sms_sent = send_sms(phone, Config, sms_body, first_name=first, last_name=last)
     return (sms_sent, guest_id)
 
 
 def phoneNumberFixer(raw_phone_number):
     number = None
-    if raw_phone_number.contains("+"):
+    if "+" in raw_phone_number:
         international = phonenumbers.parse(raw_phone_number, None)
         if phonenumbers.is_valid_number(international):
             number = phonenumbers.format_number(international, phonenumbers.PhoneNumberFormat.E164)
