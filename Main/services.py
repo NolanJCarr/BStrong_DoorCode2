@@ -1,7 +1,6 @@
-import pytz, requests, phonenumbers
-from twilio.rest import Client
-from config import get_remotelock_token
-from app import Config, membership_durations, DeveloperPhoneNumber 
+import pytz, requests
+from api_clients import get_remotelock_token
+from config import MEMBERSHIP_DURATIONS, Config, send_Dev, send_sms
 from datetime import datetime, timedelta
 from google.cloud import firestore
 
@@ -23,6 +22,8 @@ class DataBase:
         reference = self.database.collection(collection).document(key)
         if data:
             reference.set(data)
+        else:
+            reference.set({})
         return f"successfully added key: {key} to the collection: {collection}. With the data: {data}", 200
     
     def getData(self, collection, key):
@@ -36,44 +37,14 @@ class DataBase:
     def getAllOldDocs(self):
         two_days_ago = datetime.now(pytz.utc) - timedelta(days=2)
 
-        docs_pending = self.database.collection('pending_customers').where('timestamp', '<', two_days_ago).stream()
-        docs_tickets = self.database.collection('pin_change_tickets').where('timestamp', '<', two_days_ago).stream()
-        docs_transactions = self.database.collection('processed_transactions').where('timestamp', '<', two_days_ago).stream()
+        docs_pending = self.database.collection('pending_customers').where('timestamp', '<', two_days_ago).get()
+        docs_tickets = self.database.collection('pin_change_tickets').where('timestamp', '<', two_days_ago).get()
+        docs_transactions = self.database.collection('processed_transactions').where('timestamp', '<', two_days_ago).get()
         return docs_pending + docs_tickets + docs_transactions
 
     def getBatch(self):
         return self.database.batch()
     
-
-
-
-def send_sms(to_phone_number, body, to_phone_number_2 = None, first_name=None, last_name=None):
-    sid = Config.get("TWILIO_ACCOUNT_SID")
-    token = Config.get("TWILIO_AUTH_TOKEN")
-    from_num = Config.get("TWILIO_PHONE_NUMBER")
-
-    if not all([sid, token, from_num]):
-        print("Twilio credentials are not configured. Cannot send SMS.")
-        return False
-    client = Client(sid, token)
-    try:
-        client.messages.create(
-            body=body,
-            from_=from_num,
-            to=to_phone_number
-        )
-        if (to_phone_number_2) != None:
-            client.messages.create(
-            body=body,
-            from_=from_num,
-            to=to_phone_number_2
-        )
-        print(f"SMS sent to {to_phone_number}")
-        return True
-    except Exception as e:
-        print(f"Failed SMS to {first_name or ''} {last_name or ''}: {e}")
-        return False
-
 
 def createDoorCode(first, last, phone, membership_type):
     access_token = get_remotelock_token()
@@ -100,7 +71,7 @@ def createDoorCode(first, last, phone, membership_type):
         end_time_utc_naive = datetime.combine(start_day, datetime.min.time()) + timedelta(hours=22)
         end_utc = pytz.UTC.localize(end_time_utc_naive)
     else:
-        duration = membership_durations.get(membership_type.lower(), timedelta(days=0))
+        duration = MEMBERSHIP_DURATIONS.get(membership_type.lower(), timedelta(days=0))
         end_time_utc_intermediate = start_utc + duration
         end_day = end_time_utc_intermediate.date()
         end_time_utc_naive = datetime.combine(end_day, datetime.min.time()) + timedelta(hours=22)
@@ -141,7 +112,7 @@ def createDoorCode(first, last, phone, membership_type):
 
     except requests.exceptions.RequestException as e:
         print(f"RemoteLock API error: {e}")
-        send_sms(DeveloperPhoneNumber, f"RemoteLock API error for {first} {last}: {e.response.text if e.response else e}")
+        send_Dev(f"RemoteLock API error for {first} {last}: {e.response.text if e.response else e}")
         return (False, None)
 
     exp_date = end_utc.astimezone(est).strftime('%Y-%m-%d')
@@ -151,23 +122,5 @@ def createDoorCode(first, last, phone, membership_type):
     else:
         sms_body = f"Your B-STRONG door code is {pin}#. Be sure to hit the # after the numbers. If you'd like to change your door code please respond to this text with the 4 or 5 digits to set it. Your code will expire {exp_date} at 10:00 pm. Access hours are 4am-10pm. Busiest times are 8am-11am, so if you arrive at 9, plan for it to be busy. Please don't share your code with others or let anyone else in. Questions? Text Craig at 774-255-0465 or Heather at 508-685-8888. Enjoy your workout!"
     
-    sms_sent = send_sms(phone, sms_body, first, last)
+    sms_sent = send_sms(to_phone_number=phone, body=sms_body, first_name=first, last_name=last)
     return (sms_sent, guest_id)
-
-
-def phoneNumberFixer(raw_phone_number):
-    number = None
-    if raw_phone_number.contains("+"):
-        international = phonenumbers.parse(raw_phone_number, None)
-        if phonenumbers.is_valid_number(international):
-            number = phonenumbers.format_number(international, phonenumbers.PhoneNumberFormat.E164)
-            return {'valid': True, 'number':number}   
-    else:
-        US_number = phonenumbers.parse(raw_phone_number, "US")
-        if phonenumbers.is_valid_number(US_number):
-            number = phonenumbers.format_number(US_number, phonenumbers.PhoneNumberFormat.E164)
-            return {'valid': True, 'number':number} 
-    print(f"Invalid phone number '{raw_phone_number}' in Firestore. Will use API for phone number.")
-    return {'valid': False, 'number':raw_phone_number}
-        
-

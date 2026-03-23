@@ -1,11 +1,24 @@
+import os, phonenumbers
 from google.cloud import secretmanager
-from app import DeveloperPhoneNumber
-from datetime import timedelta, datetime
-from services import send_sms
-import os, requests, time
-
+from datetime import timedelta
+from twilio.rest import Client
 
 GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID")
+
+MEMBERSHIP_DURATIONS = {
+    "weekend warrior": timedelta(days=2),
+    "1 week pass": timedelta(weeks=1),
+    "2 week pass": timedelta(weeks=2),
+    "3 week pass": timedelta(weeks=3),
+    "1 month gym membership": timedelta(days=30),
+    "12 month autopay (9-mo @ $99/ 3 mo-free)": timedelta(days=365),
+    "best rate!!! one year (pif)": timedelta(days=365),
+    "2 month gym membership": timedelta(days=60),
+    "3 month gym membership": timedelta(days=90),
+    "6 month gym membership": timedelta(days=180),
+    "day pass (not a class) - 4am-10pm for one individual, for one calendar day.": timedelta(days=0),
+    "day pass": timedelta(days=0)
+}
 
 class Config:
     _secrets = {}
@@ -20,8 +33,7 @@ class Config:
             return val
         except Exception as e:
             print(f"Failed to fetch config key {key}: {e}")
-            return None
-
+            return None       
 
 def get_secret(secret_id, version_id="latest"):
     """Fetches a secret from Google Secret Manager."""
@@ -36,105 +48,50 @@ def get_secret(secret_id, version_id="latest"):
     except Exception as e:
         print(f"Error accessing secret: {secret_id}. Details: {e}")
         raise e
-
-
-def get_vagaro_customer_details(cust_id):
-    token = get_vagaro_token()
-    if not token:
-        return None
-
-    business_id = Config.get("BUSINESS_ID")
-    if not business_id:
-        print("Missing Business ID")
-        return None
-
-    headers = {
-        "accept": "application/json",
-        "content-type": "application/json",
-        "accessToken": token,
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-    }
     
-    payload = {"businessId": business_id, "customerId": cust_id}
-    
+def send_sms(to_phone_number, body, to_phone_number_2 = None, first_name=None, last_name=None):
+    sid = Config.get("TWILIO_ACCOUNT_SID")
+    token = Config.get("TWILIO_AUTH_TOKEN")
+    from_num = Config.get("TWILIO_PHONE_NUMBER")
+
+    if not all([sid, token, from_num]):
+        print("Twilio credentials are not configured. Cannot send SMS.")
+        return False
+    client = Client(sid, token)
     try:
-        vagaro_resp = requests.post(
-            "https://api.vagaro.com/us03/api/v2/customers",
-            json=payload,
-            headers=headers
-        )
-        if vagaro_resp.status_code != 200:
-            print(f"Vagaro customer API returned status {vagaro_resp.status_code} with response: {vagaro_resp.text}")
-        vagaro_resp.raise_for_status()
-        return vagaro_resp.json().get("data")
+        client.messages.create(body=body, from_=from_num, to=to_phone_number)
+        if to_phone_number_2:
+            client.messages.create(body=body, from_=from_num, to=to_phone_number_2)
+        print(f"SMS sent to {to_phone_number}")
+        return True
     
-    except requests.exceptions.RequestException as e:
-        send_sms(DeveloperPhoneNumber, f"Vagaro API error for customer {cust_id}: {e.response.text if e.response else e}")
-        return None
+    except Exception as e:
+        print(f"Failed SMS to {first_name or ''} {last_name or ''}: {e}")
+        return False
     
+def send_Dev(body): 
+    return send_sms(to_phone_number=Config.get("DEVELOPER_PHONE_NUMBER"),body=body)
 
-def get_remotelock_token():
-    global remote_lock_token, token_expiry
-    if remote_lock_token and token_expiry and datetime.utcnow() < token_expiry:
-        return remote_lock_token
+def phoneNumberFixer(raw_phone_number):
+    if not raw_phone_number:
+        return {'valid': False, 'number': None}
 
-    client_id = Config.get("REMOTELOCK_CLIENT_ID")
-    client_secret = Config.get("REMOTELOCK_CLIENT_SECRET")
-    token_url = Config.get("TOKEN_URL")
+    clean_num = str(raw_phone_number).strip()
 
-    if not all([client_id, client_secret, token_url]):
-        return None
-
-    payload = {
-        "grant_type": "client_credentials",
-        "client_id": client_id,
-        "client_secret": client_secret
-    }
     try:
-        resp = requests.post(token_url, json=payload)
-        resp.raise_for_status()
-        data = resp.json()
-        remote_lock_token = data["access_token"]
-        token_expiry = datetime.utcnow() + timedelta(seconds=data["expires_in"] - 60)
-        return remote_lock_token
-    except requests.exceptions.RequestException as e:
-        print(f"Error getting RemoteLock token: {e}")
-        send_sms(DeveloperPhoneNumber, f"Could not refresh RemoteLock token: {e}")
-        return None
+        parsed = phonenumbers.parse(clean_num, "US")
+        if not phonenumbers.is_valid_number(parsed):
+            if not clean_num.startswith('+'):
+                parsed = phonenumbers.parse("+" + clean_num, None)
+            else:
+                parsed = phonenumbers.parse(clean_num, None)
 
-
-def get_vagaro_token():
-    global _vagaro_cached_token, _vagaro_expires_at
-    now = time.time()
-    if _vagaro_cached_token and now < _vagaro_expires_at - 60:
-        return _vagaro_cached_token
-        
-    client_id = Config.get("VAGARO_CLIENT_ID")
-    client_secret = Config.get("VAGARO_CLIENT_SECRET")
-
-    if not all([client_id, client_secret]):
-        return None
-
-    url = "https://api.vagaro.com/us03/api/v2/merchants/generate-access-token"
-    headers = {
-        "accept": "application/json",
-        "content-type": "application/json",
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-    }
-    payload = {
-        "clientId": client_id,
-        "clientSecretKey": client_secret
-    }
-    
-    try:
-        r = requests.post(url, json=payload, headers=headers)
-        r.raise_for_status()
-        data = r.json()["data"]
-        _vagaro_cached_token = data["access_token"]
-        _vagaro_expires_at = now + data.get("expires_in", 3600)
-        return _vagaro_cached_token
-    
-    except requests.exceptions.RequestException as e:
-        print(f"Error getting Vagaro token: {e}")
-        send_sms(DeveloperPhoneNumber, f"Could not refresh Vagaro token: {e.response.text if e.response else e}")
-        return None
+        if phonenumbers.is_valid_number(parsed):
+            return {
+                'valid': True, 
+                'number': phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
+            }
+            
+    except Exception as e:
+        print(f"Parsing error for {raw_phone_number}: {e}")
+    return {'valid': False, 'number': raw_phone_number}

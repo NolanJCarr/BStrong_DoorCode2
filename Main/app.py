@@ -1,34 +1,18 @@
-import os, requests, re, pytz, phonenumbers
+import os, requests, re, pytz
 from flask import Flask, request, abort
 from datetime import datetime, timedelta
-from services import send_sms, createDoorCode, DataBase, phoneNumberFixer
-from config import Config, get_vagaro_customer_details
+from config import Config, send_sms, send_Dev, phoneNumberFixer
+from services import DataBase, createDoorCode
+from api_clients import get_vagaro_customer_details, get_remotelock_token
 from google.cloud import firestore
 from twilio.request_validator import RequestValidator
-from Main.config import get_access_token
 
 app = Flask(__name__)
 
-DeveloperPhoneNumber = Config.get("DEVELOPER_PHONE_NUMBER")
 Owner1 = Config.get("OWNER_PHONE_NUMBER_1")
 Owner2 = Config.get("OWNER_PHONE_NUMBER_2")
 miscCustomerID = Config.get("MISC_PERSON_CUSTID")
 dataBase = DataBase()
-
-membership_durations = {
-    "weekend warrior": timedelta(days=2),
-    "1 week pass": timedelta(weeks=1),
-    "2 week pass": timedelta(weeks=2),
-    "3 week pass": timedelta(weeks=3),
-    "1 month gym membership": timedelta(days=30),
-    "12 month autopay (9-mo @ $99/ 3 mo-free)": timedelta(days=365),
-    "best rate!!! one year (pif)": timedelta(days=365),
-    "2 month gym membership": timedelta(days=60),
-    "3 month gym membership": timedelta(days=90),
-    "6 month gym membership": timedelta(days=180),
-    "day pass (not a class) - 4am-10pm for one individual, for one calendar day.": timedelta(days=0),
-    "day pass": timedelta(days=0)
-}
 
 # --- Form Webhook Handler ----------------------------------------------
 @app.route("/webhook-form", methods=['POST'])
@@ -62,11 +46,11 @@ def form_webhook():
             'phone_number': questions[2]["answer"][0],
             'timestamp': firestore.SERVER_TIMESTAMP
         }
-        DataBase.add(collection='pending_customers', key=customer_id, data=Person)
+        dataBase.add(collection='pending_customers', key=customer_id, data=Person)
 
     except Exception as e:
         print(f"Error processing form webhook for customer {customer_id}: {e}")
-        send_sms(DeveloperPhoneNumber, f"Failed to process form for customer {customer_id}: {e}")
+        send_Dev(f"Failed to process form for customer {customer_id}: {e}")
         return "Error processing form data", 500
 
 # --- Transaction Webhook Handler ----------------------------------
@@ -88,16 +72,16 @@ def transaction_webhook():
     customer_id = payload.get("customerId")
 
     print(f"Received transaction: {item_sold} for customerId: '[{customer_id}]'")
-    if customer_id or customer_id.strip() == miscCustomerID:
+    if customer_id and customer_id.strip() == miscCustomerID:
         print("Ignoring transaction for POS Miscellaneous account.")
         return "POS Miscellaneous transaction ignored", 200
 
     purchase_type = payload.get("purchaseType")
-    is_membership = purchase_type == "Membership"
+    is_membership_or_autopay = purchase_type == "Membership" #or (purchase_type == "Package" and item_sold == "12 month autopay (9-mo @ $99/ 3 mo-free)")
     is_class_day_pass = purchase_type == "Class" and "day pass (not a class) - 4am-10pm for one individual, for one calendar day." in item_sold
     is_package_day_pass = purchase_type == "Package" and item_sold == "day pass"
 
-    if not (is_membership or is_class_day_pass or is_package_day_pass):
+    if not (is_membership_or_autopay or is_class_day_pass or is_package_day_pass):
         print(f"Ignoring non-membership/day pass purchase: Type='{purchase_type}', Item='{item_sold}'")
         return "Not a relevant purchase type", 200
 
@@ -144,7 +128,7 @@ def transaction_webhook():
     
     except Exception as e:
         print(f"Error accessing Firestore for customer {customer_id}: {e}. Using API fallback.")
-        send_sms(DeveloperPhoneNumber, f"Firestore access error for {customer_id}: {e}")
+        send_Dev(f"Firestore access error for {customer_id}: {e}")
 
     
     if not phone_is_valid:
@@ -167,16 +151,20 @@ def transaction_webhook():
 
             result = phoneNumberFixer(phone_raw)
             if result.get('valid'):
+                phone = result.get("number")
                 print(f"Using valid phone number '{phone}' from API.")
+            else:
+                phone = phone_raw 
+                print(f"Phone fixer could not verify '{phone_raw}'. Trying raw.")
 
         except Exception as e:
             print(f"Failed to get customer details via API fallback: {e}")
             customer_name = f"{first or 'Unknown'} {last or 'Customer'}"
-            send_sms(Owner1, f"Failed to send code to {customer_name}", Owner2)
+            send_sms(to_phone_number=Owner1, body=f"Failed to send code to {customer_name}", to_phone_number_2=Owner2)
             return "Error fetching customer data", 500
 
     if not (first and last and phone):
-        send_sms(Owner1, f"{first or 'Unknown'} {last or 'Customer'} didn't get a door code", Owner2)
+        send_sms(to_phone_number=Owner1, body=f"{first or 'Unknown'} {last or 'Customer'} didn't get a door code", to_phone_number_2=Owner2)
         return "Incomplete customer data", 500
 
     print(f"Processing purchase for {first} {last}: ({item_sold})")
@@ -191,13 +179,12 @@ def transaction_webhook():
                 print(f"Created PIN change ticket for {first} {last} with number: {phone}")
             except Exception as e:
                 print(f"Failed to create PIN change ticket for {phone}: {e}")
-                send_sms(DeveloperPhoneNumber, f"Failed to create PIN ticket for {phone}: {e}")
+                send_Dev(f"Failed to create PIN ticket for {phone}: {e}")
         return "Door code created successfully", 200
     
     else:
-        send_sms(Owner1, f"{first} {last} didn't get a door code.", Owner2)
+        send_sms(to_phone_number=Owner1, body=f"{first} {last} didn't get a door code.", to_phone_number_2=Owner2)
         return "Failed to create door code", 500
-
 
 
 # --- SMS Webhook Handler for PIN Changes ----------------------
@@ -230,18 +217,18 @@ def smsPinChanges():
     timestamp = ticket_data.get('timestamp')
 
     if datetime.now(pytz.utc) > (timestamp + timedelta(hours=48)):
-        send_sms(from_number, "Sorry, the 48-hour window for changing your PIN has expired.")
+        send_sms(to_phone_number=from_number, body="Sorry, the 48-hour window for changing your PIN has expired.")
         dataBase.delete('pin_change_tickets', from_number)
         return "Ticket expired.", 200
 
     cleaned_pin = body.replace('#', '')
     if not re.match(r'^\d{4,5}$', cleaned_pin):
-        send_sms(from_number, "Invalid reponse. Please try again with just the 4 or 5 numbers you'd like for your door code.")
+        send_sms(to_phone_number=from_number, body="Invalid reponse. Please try again with just the 4 or 5 numbers you'd like for your door code.")
         return "Invalid PIN format.", 200
 
-    access_token = get_access_token()
+    access_token = get_remotelock_token()
     if not access_token:
-        send_sms(DeveloperPhoneNumber, f"Could not get RemoteLock token for PIN change for {from_number}")
+        send_Dev(f"Could not get RemoteLock token for PIN change for {from_number}")
         return "Internal error.", 500
 
     update_url = f"https://api.remotelock.com/access_persons/{remote_lock_id}"
@@ -255,12 +242,12 @@ def smsPinChanges():
     try:
         response = requests.put(update_url, json=payload, headers=headers)
         if response.status_code == 200:
-            send_sms(from_number, f"Door code successfully set to {cleaned_pin}#")
+            send_sms(to_phone_number=from_number, body=f"Door code successfully set to {cleaned_pin}#")
             dataBase.delete('pin_change_tickets', from_number)
             return "PIN updated.", 200
         
         elif response.status_code == 422:
-            send_sms(from_number, "Sorry, that code is already in use. Please try again.")
+            send_sms(to_phone_number=from_number, body="Sorry, that code is already in use. Please try again.")
             return "PIN taken.", 200
         
         else:
@@ -268,8 +255,8 @@ def smsPinChanges():
     
     except requests.exceptions.RequestException as e:
         print(f"Failed to update PIN for {from_number}: {e}")
-        send_sms(DeveloperPhoneNumber, f"RemoteLock API error on PIN update for {from_number}: {e.response.text if e.response else e}")
-        send_sms(from_number, "Sorry, an error occurred while updating your code. Please contact staff.")
+        send_Dev(f"RemoteLock API error on PIN update for {from_number}: {e.response.text if e.response else e}")
+        send_sms(to_phone_number=from_number, body="Sorry, an error occurred while updating your code. Please contact staff.")
         return "RemoteLock error.", 500
     
     return "OK", 200
@@ -300,7 +287,7 @@ def cleanup_firestore():
 
     except Exception as e:
         print(f"Error during Firestore cleanup: {e}")
-        send_sms(DeveloperPhoneNumber, f"Firestore cleanup job failed: {e}")
+        send_Dev(f"Firestore cleanup job failed: {e}")
         return "Error during cleanup", 500
 
 
