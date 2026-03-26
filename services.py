@@ -64,18 +64,17 @@ def createDoorCode(first, last, phone, membership_type):
     else:
         start_day = current_time_est.date() + timedelta(days=1)
 
-    start_time_utc_naive = datetime.combine(start_day, datetime.min.time()) + timedelta(hours=4)
-    start_utc = pytz.UTC.localize(start_time_utc_naive)
+    start_time_est = est.localize(datetime.combine(start_day, datetime.time(4, 0)))
+    start_utc = start_time_est.replace(tzinfo=pytz.UTC)
 
     if "day pass" in membership_type.lower():
-        end_time_utc_naive = datetime.combine(start_day, datetime.min.time()) + timedelta(hours=22)
-        end_utc = pytz.UTC.localize(end_time_utc_naive)
+        end_time_est = est.localize(datetime.combine(start_day, datetime.time(22, 0)))
     else:
         duration = MEMBERSHIP_DURATIONS.get(membership_type.lower(), timedelta(days=0))
-        end_time_utc_intermediate = start_utc + duration
-        end_day = end_time_utc_intermediate.date()
-        end_time_utc_naive = datetime.combine(end_day, datetime.min.time()) + timedelta(hours=22)
-        end_utc = pytz.UTC.localize(end_time_utc_naive)
+        end_moment_est = start_time_est + duration
+        end_time_est = est.localize(datetime.combine(end_moment_est.date(), datetime.time(22, 0)))
+    
+    end_utc = end_time_est.replace(tzinfo=pytz.UTC)
 
     payload = {
         "type": "access_guest",
@@ -94,7 +93,7 @@ def createDoorCode(first, last, phone, membership_type):
 
     guest_id = None
     try:
-        cr = requests.post("https://api.remotelock.com/access_persons", json=payload, headers=hdr)
+        cr = requests.post("https://api.remotelock.com/access_persons", json=payload, headers=hdr, timeout=10)
         cr.raise_for_status()
         guest = cr.json()["data"]
         pin = guest["attributes"]["pin"]
@@ -107,7 +106,7 @@ def createDoorCode(first, last, phone, membership_type):
                            "access_schedule_id": "d18e46f1-22b4-4880-9b0b-3d1ea60441fc"
                            }
         }
-        gr = requests.post(f"https://api.remotelock.com/access_persons/{guest_id}/accesses", json=grant, headers=hdr)
+        gr = requests.post(f"https://api.remotelock.com/access_persons/{guest_id}/accesses", json=grant, headers=hdr, timeout=10)
         gr.raise_for_status()
 
     except requests.exceptions.RequestException as e:

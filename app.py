@@ -77,14 +77,13 @@ def transaction_webhook():
         return "POS Miscellaneous transaction ignored", 200
 
     purchase_type = payload.get("purchaseType")
-    is_membership_or_autopay = purchase_type == "Membership" #or (purchase_type == "Package" and item_sold == "12 month autopay (9-mo @ $99/ 3 mo-free)")
+    is_membership_or_autopay = purchase_type == "Membership"
     is_class_day_pass = purchase_type == "Class" and "day pass (not a class) - 4am-10pm for one individual, for one calendar day." in item_sold
     is_package_day_pass = purchase_type == "Package" and item_sold == "day pass"
 
     if not (is_membership_or_autopay or is_class_day_pass or is_package_day_pass):
         print(f"Ignoring non-membership/day pass purchase: Type='{purchase_type}', Item='{item_sold}'")
         return "Not a relevant purchase type", 200
-
 
     unique_id = payload.get("userPaymentId")
     if not unique_id:
@@ -240,7 +239,7 @@ def smsPinChanges():
     payload = {"attributes": {"pin": cleaned_pin}}
 
     try:
-        response = requests.put(update_url, json=payload, headers=headers)
+        response = requests.put(update_url, json=payload, headers=headers, timeout=10)
         if response.status_code == 200:
             send_sms(to_phone_number=from_number, body=f"Door code successfully set to {cleaned_pin}#")
             dataBase.delete('pin_change_tickets', from_number)
@@ -260,7 +259,6 @@ def smsPinChanges():
         return "RemoteLock error.", 500
     
     return "OK", 200
-
 
 
 @app.route("/cleanup-firestore", methods=['POST'])

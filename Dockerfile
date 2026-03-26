@@ -25,4 +25,4 @@ COPY . .
 # --workers 1: The number of worker processes. For a simple app, 1 is fine.
 # --threads 8: The number of threads per worker.
 # main:app: Tells Gunicorn to look for an app instance in the main.py file.
-CMD exec gunicorn --bind 0.0.0.0:$PORT --workers 1 --threads 8 main:app
+CMD exec gunicorn --bind 0.0.0.0:$PORT --workers 1 --threads 8 app:app
