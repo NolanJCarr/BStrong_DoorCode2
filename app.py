@@ -1,4 +1,4 @@
-import os, requests, re, pytz
+import os, requests, re, pytz, jwt, base64
 from flask import Flask, request, abort
 from datetime import datetime, timedelta
 from config import Config, send_sms, send_Dev, phoneNumberFixer
@@ -47,6 +47,7 @@ def form_webhook():
             'timestamp': firestore.SERVER_TIMESTAMP
         }
         dataBase.add(collection='pending_customers', key=customer_id, data=Person)
+        return "Success", 200
 
     except Exception as e:
         print(f"Error processing form webhook for customer {customer_id}: {e}")
@@ -62,6 +63,7 @@ def transaction_webhook():
     if sig != expected_token:
         print(f"Bad signature received: {sig}")
         abort(403, "Forbidden: Invalid signature.")
+
 
     data = request.get_json(silent=True)
     if not data or "payload" not in data:
@@ -90,10 +92,14 @@ def transaction_webhook():
         unique_id = payload.get("transactionId")
 
 
-    dataBase.add(unique_id, 'processed_transactions')
-    
-    if not (dataBase.checkIfExists('processed_transactions', unique_id)):
-        dataBase.add(unique_id, 'processed_transactions', {'timestamp': firestore.SERVER_TIMESTAMP})
+    if dataBase.checkIfExists('processed_transactions', unique_id):
+        print(f"Duplicate transaction detected: {unique_id}. Skipping.")
+        return "Duplicate transaction", 200
+
+    try:
+        dataBase.add('processed_transactions', unique_id, {'timestamp': firestore.SERVER_TIMESTAMP})
+    except Exception as e:
+        print(f"Error saving transaction to Firestore: {e}")
 
 
     first = None
@@ -159,11 +165,11 @@ def transaction_webhook():
         except Exception as e:
             print(f"Failed to get customer details via API fallback: {e}")
             customer_name = f"{first or 'Unknown'} {last or 'Customer'}"
-            send_sms(to_phone_number=Owner1, body=f"Failed to send code to {customer_name}", to_phone_number_2=Owner2)
+            #send_sms(to_phone_number=Owner1, body=f"Failed to send code to {customer_name}", to_phone_number_2=Owner2)
             return "Error fetching customer data", 500
 
     if not (first and last and phone):
-        send_sms(to_phone_number=Owner1, body=f"{first or 'Unknown'} {last or 'Customer'} didn't get a door code", to_phone_number_2=Owner2)
+        #send_sms(to_phone_number=Owner1, body=f"{first or 'Unknown'} {last or 'Customer'} didn't get a door code", to_phone_number_2=Owner2)
         return "Incomplete customer data", 500
 
     print(f"Processing purchase for {first} {last}: ({item_sold})")
@@ -180,7 +186,6 @@ def transaction_webhook():
                 print(f"Failed to create PIN change ticket for {phone}: {e}")
                 send_Dev(f"Failed to create PIN ticket for {phone}: {e}")
         return "Door code created successfully", 200
-    
     else:
         send_sms(to_phone_number=Owner1, body=f"{first} {last} didn't get a door code.", to_phone_number_2=Owner2)
         return "Failed to create door code", 500
@@ -205,7 +210,7 @@ def smsPinChanges():
     from_number = request.form.get('From')
     body = request.form.get('Body', '').strip()
 
-    ticket = dataBase.get('pin_change_tickets', from_number)
+    ticket = dataBase.getData('pin_change_tickets', from_number)
 
     if not ticket.exists:
         print(f"No PIN change ticket found for {from_number}. Ignoring.")

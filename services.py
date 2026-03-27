@@ -1,7 +1,7 @@
 import pytz, requests
 from api_clients import get_remotelock_token
 from config import MEMBERSHIP_DURATIONS, Config, send_Dev, send_sms
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 from google.cloud import firestore
 
 
@@ -64,15 +64,15 @@ def createDoorCode(first, last, phone, membership_type):
     else:
         start_day = current_time_est.date() + timedelta(days=1)
 
-    start_time_est = est.localize(datetime.combine(start_day, datetime.time(4, 0)))
+    start_time_est = est.localize(datetime.combine(start_day, time(4, 0)))
     start_utc = start_time_est.replace(tzinfo=pytz.UTC)
 
     if "day pass" in membership_type.lower():
-        end_time_est = est.localize(datetime.combine(start_day, datetime.time(22, 0)))
+        end_time_est = est.localize(datetime.combine(start_day, time(22, 0)))
     else:
         duration = MEMBERSHIP_DURATIONS.get(membership_type.lower(), timedelta(days=0))
         end_moment_est = start_time_est + duration
-        end_time_est = est.localize(datetime.combine(end_moment_est.date(), datetime.time(22, 0)))
+        end_time_est = est.localize(datetime.combine(end_moment_est.date(), time(22, 0)))
     
     end_utc = end_time_est.replace(tzinfo=pytz.UTC)
 
