@@ -1,4 +1,4 @@
-import requests, time
+import requests, time, json
 from datetime import datetime, timedelta, timezone
 from config import Config, send_Dev
 
@@ -8,37 +8,29 @@ _vagaro_cached_token = None
 _vagaro_expires_at = 0
 
 VAGARO_URL = "https://api.vagaro.com/us03/api/v2/customers"
-VAGARO_TOKEN_URL = "https://api.vagaro.com/us03/api/v2/merchants/generate-access-token"
 REMOTELOCK_TOKEN_URL = "https://connect.remotelock.com/oauth/token"
-BUSINESS_ID = Config.get("BUSINESS_ID")
+BUSINESS_ID = "e9S4DjyPbv-ccrPDDqzBEA=="
+WORKER_URL = "https://bstrong-vagaro-proxy.nolantatum6.workers.dev"
 
 
 def get_vagaro_customer_details(cust_id):
 
     token = get_vagaro_token()
-    if not token or not BUSINESS_ID:
+    if not token:
         print("Could not get customer details from Vagaro from either Missing token or Wrong BuisnessID")
         send_Dev("Could not get customer details from Vagaro from either Missing token or Wrong BuisnessID")
         return None
 
     headers = {
-        "accept": "application/json",
-        "content-type": "application/json",
-        "accessToken": token,
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        "Authorization": f"Bearer {token}",
+        "X-Target-Url": f"https://api.vagaro.com/us03/api/v2/customers",
+        "Content-Type": "application/json"
     }
     
     payload = {"businessId": BUSINESS_ID, "customerId": cust_id}
     
     try:
-        vagaro_resp = requests.post(
-            VAGARO_URL,
-            json=payload,
-            headers=headers,
-            timeout=10
-        )
-        if vagaro_resp.status_code != 200:
-            print(f"Vagaro customer API returned status {vagaro_resp.status_code} with response: {vagaro_resp.text}")
+        vagaro_resp = requests.post(WORKER_URL, json=payload, headers=headers, timeout=10)
         vagaro_resp.raise_for_status()
         return vagaro_resp.json().get("data")
     
@@ -85,31 +77,47 @@ def get_vagaro_token():
         
     client_id = Config.get("VAGARO_CLIENT_ID")
     client_secret = Config.get("VAGARO_CLIENT_SECRET")
+    id_val = "U2FsdGVkX19Lq2o04YnVM8ShELlFW7op3bMwltpBCLI="
+    secret_val = "ElRXpaiPsJzZSRepmZmwuNRbCXNvws"
+
+    print(f"DEBUG: ID starts with: {str(client_id)[:4]}... Secret length: {len(str(client_secret))}")
 
     if not all([client_id, client_secret]):
         return None
 
-
     headers = {
-        "accept": "application/json",
-        "content-type": "application/json",
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        "X-Target-Url": "https://api.vagaro.com/us03/api/v2/merchants/generate-access-token",
+        "Content-Type": "application/json"
     }
     payload = {
-        "clientId": client_id,
-        "clientSecretKey": client_secret
+        "clientId": id_val,
+        "clientSecretKey": secret_val
     }
     
     try:
-        r = requests.post(VAGARO_TOKEN_URL, json=payload, headers=headers, timeout=10)
+        r = requests.post(WORKER_URL, json={}, headers=headers, timeout=10)
         r.raise_for_status()
         resp_json = r.json()
-        data = resp_json.get("data", {})
-        _vagaro_cached_token = data.get("access_token")
-        _vagaro_expires_at = now + data.get("expires_in", 3600)
+        
+        # LOG THIS so you can see the structure in GCP Logs
+        print(f"RAW WORKER RESPONSE: {resp_json}")
+
+        # Vagaro usually returns { "data": { "access_token": "..." } }
+        # But if your worker returns it differently, we handle both:
+        if "data" in resp_json:
+            _vagaro_cached_token = resp_json["data"].get("access_token")
+        else:
+            _vagaro_cached_token = resp_json.get("access_token")
+
+        if not _vagaro_cached_token:
+            raise ValueError("Token not found in response")
+
+        _vagaro_expires_at = time.time() + 3600
         return _vagaro_cached_token
     
     except requests.exceptions.RequestException as e:
-        print(f"Error getting Vagaro token: {e}")
-        send_Dev(f"Could not refresh Vagaro token: {e.response.text if e.response else e}")
+        print(f"Error getting Vagaro token via Worker: {e}")
+        # Providing more detail in the dev alert helps troubleshoot
+        error_msg = e.response.text if e.response else str(e)
+        send_Dev(f"Could not refresh Vagaro token: {error_msg}")
         return None

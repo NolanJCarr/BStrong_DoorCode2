@@ -6,3 +6,4 @@ phonenumbers
 google-cloud-firestore
 google-cloud-secret-manager
 twilio
+PyJWT

@@ -1,4 +1,4 @@
-import os, requests, re, pytz
+import os, requests, re, pytz, jwt, base64
 from flask import Flask, request, abort
 from datetime import datetime, timedelta
 from config import Config, send_sms, send_Dev, phoneNumberFixer
@@ -47,6 +47,7 @@ def form_webhook():
             'timestamp': firestore.SERVER_TIMESTAMP
         }
         dataBase.add(collection='pending_customers', key=customer_id, data=Person)
+        return "Success", 200
 
     except Exception as e:
         print(f"Error processing form webhook for customer {customer_id}: {e}")
@@ -78,7 +79,7 @@ def transaction_webhook():
 
     purchase_type = payload.get("purchaseType")
     is_membership_or_autopay = purchase_type == "Membership"
-    is_class_day_pass = purchase_type == "Class" and "day pass (not a class) - 4am-10pm for one individual, for one calendar day." in item_sold
+    is_class_day_pass = purchase_type == "Class" and "day pass" in item_sold and "4am-10pm" in item_sold
     is_package_day_pass = purchase_type == "Package" and item_sold == "day pass"
 
     if not (is_membership_or_autopay or is_class_day_pass or is_package_day_pass):
@@ -90,10 +91,14 @@ def transaction_webhook():
         unique_id = payload.get("transactionId")
 
 
-    dataBase.add(unique_id, 'processed_transactions')
-    
-    if not (dataBase.checkIfExists('processed_transactions', unique_id)):
-        dataBase.add(unique_id, 'processed_transactions', {'timestamp': firestore.SERVER_TIMESTAMP})
+    if dataBase.checkIfExists('processed_transactions', unique_id):
+        print(f"Duplicate transaction detected: {unique_id}. Skipping.")
+        return "Duplicate transaction", 200
+
+    try:
+        dataBase.add('processed_transactions', unique_id, {'timestamp': firestore.SERVER_TIMESTAMP})
+    except Exception as e:
+        print(f"Error saving transaction to Firestore: {e}")
 
 
     first = None
@@ -111,10 +116,12 @@ def transaction_webhook():
             phone_raw_from_firestore = customer_data.get('phone_number')
             
             try:
-                phone = phoneNumberFixer(phone_raw_from_firestore)
-                if phone.get('valid'):
+                phone_result = phoneNumberFixer(phone_raw_from_firestore)
+                
+                if phone_result.get('valid'):
                     phone_is_valid = True
-                    print(f"Valid phone number '{phone.get('number')}' found in Firestore.")
+                    phone = phone_result.get('number') 
+                    print(f"Valid phone number '{phone}' found in Firestore.")
 
             except Exception as e:
                 print(f"Error parsing phone from Firestore: {e}. Will use API for phone number.")
@@ -205,7 +212,7 @@ def smsPinChanges():
     from_number = request.form.get('From')
     body = request.form.get('Body', '').strip()
 
-    ticket = dataBase.get('pin_change_tickets', from_number)
+    ticket = dataBase.getData('pin_change_tickets', from_number)
 
     if not ticket.exists:
         print(f"No PIN change ticket found for {from_number}. Ignoring.")
