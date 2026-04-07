@@ -64,6 +64,7 @@ def transaction_webhook():
         print(f"Bad signature received: {sig}")
         abort(403, "Forbidden: Invalid signature.")
 
+
     data = request.get_json(silent=True)
     if not data or "payload" not in data:
         return "Invalid payload", 400
@@ -166,11 +167,11 @@ def transaction_webhook():
         except Exception as e:
             print(f"Failed to get customer details via API fallback: {e}")
             customer_name = f"{first or 'Unknown'} {last or 'Customer'}"
-            send_sms(to_phone_number=Owner1, body=f"Failed to send code to {customer_name}", to_phone_number_2=Owner2)
+            #send_sms(to_phone_number=Owner1, body=f"Failed to send code to {customer_name}", to_phone_number_2=Owner2)
             return "Error fetching customer data", 500
 
     if not (first and last and phone):
-        send_sms(to_phone_number=Owner1, body=f"{first or 'Unknown'} {last or 'Customer'} didn't get a door code", to_phone_number_2=Owner2)
+        #send_sms(to_phone_number=Owner1, body=f"{first or 'Unknown'} {last or 'Customer'} didn't get a door code", to_phone_number_2=Owner2)
         return "Incomplete customer data", 500
 
     print(f"Processing purchase for {first} {last}: ({item_sold})")
@@ -187,7 +188,6 @@ def transaction_webhook():
                 print(f"Failed to create PIN change ticket for {phone}: {e}")
                 send_Dev(f"Failed to create PIN ticket for {phone}: {e}")
         return "Door code created successfully", 200
-    
     else:
         send_sms(to_phone_number=Owner1, body=f"{first} {last} didn't get a door code.", to_phone_number_2=Owner2)
         return "Failed to create door code", 500

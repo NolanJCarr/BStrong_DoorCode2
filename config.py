@@ -49,7 +49,7 @@ def get_secret(secret_id, version_id="latest"):
         print(f"Error accessing secret: {secret_id}. Details: {e}")
         raise e
     
-def send_sms(to_phone_number, body, to_phone_number_2 = None, first_name=None, last_name=None):
+def send_sms(to_phone_number, body, to_phone_number_2=None, first_name=None, last_name=None):
     sid = Config.get("TWILIO_ACCOUNT_SID")
     token = Config.get("TWILIO_AUTH_TOKEN")
     from_num = Config.get("TWILIO_PHONE_NUMBER")
@@ -57,12 +57,18 @@ def send_sms(to_phone_number, body, to_phone_number_2 = None, first_name=None, l
     if not all([sid, token, from_num]):
         print("Twilio credentials are not configured. Cannot send SMS.")
         return False
+        
     client = Client(sid, token)
+    primary_sender = from_num if to_phone_number.startswith("+1") else "B-STRONG"
+
     try:
-        client.messages.create(body=body, from_=from_num, to=to_phone_number)
+        client.messages.create(body=body, from_=primary_sender, to=to_phone_number)
+        
         if to_phone_number_2:
-            client.messages.create(body=body, from_=from_num, to=to_phone_number_2)
-        print(f"SMS sent to {to_phone_number}")
+            secondary_sender = from_num if to_phone_number_2.startswith("+1") else "B-STRONG"
+            client.messages.create(body=body, from_=secondary_sender, to=to_phone_number_2)
+
+        print(f"SMS sent to {to_phone_number} via {primary_sender}")
         return True
     
     except Exception as e:

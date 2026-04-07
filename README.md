@@ -1,95 +1,40 @@
-B-Strong Gym Automation Service
-Overview
-This project is a serverless webhook handler built on Google Cloud Platform (GCP) designed to automate door code generation and management for the B-Strong Gym. It integrates with Vagaro for member purchases, Twilio for SMS communication, and RemoteLock for physical door access.
+B-Strong Gym Automation
+This service automates door access for B-Strong Gym by linking Vagaro (bookings), RemoteLock (hardware), and Twilio (SMS). It ensures every member receives a unique access code immediately after purchase, whether they sign up online or in person.
 
-The system is designed to be robust and resilient, with a primary workflow for online signups and an automatic fallback for in-person purchases or data inconsistencies. It also includes features for members to customize their door codes and for automatic database maintenance.
+Core Workflow
+Trigger: A membership or day pass is purchased in Vagaro.
 
-Key Features
-Automated Door Code Generation: Instantly creates a time-based door code via the RemoteLock API when a new membership or day pass is purchased in Vagaro.
+Data Retrieval: The system pulls the member's name and phone number from a pre-filled signup form (Firestore) or falls back to the Vagaro API for in-person walk-ins.
 
-Dual-Source Information Gathering:
+Code Creation: A time-synced PIN is generated via RemoteLock.
 
-Primary Path (Online): Captures member details from a Vagaro form submission and temporarily stores them in Firestore for fast processing.
+Delivery: The PIN is texted to the member instantly.
 
-Fallback Path (In-Person): If form data is not found, it automatically calls the Vagaro API to retrieve member details from their profile, ensuring both online and in-person purchases are handled.
+Customization: Members can reply to the text within 48 hours to change their PIN to a custom 4 or 5-digit number.
 
-SMS Notifications: Uses Twilio to send the new door code directly to the member's phone.
+Features
+Intelligent Fallback: Handles data gaps automatically so no customer is left locked out.
 
-Member PIN Customization: Allows members to change their assigned door code by replying to the initial text within a 48-hour window. The system validates the new PIN and confirms the change via SMS.
+Global Reach: Uses Alphanumeric Sender IDs to ensure reliable delivery to international members (UK, Serbia, etc.).
 
-Intelligent Error Handling:
+Error Reporting: Differentiates between technical bugs (alerts developers) and customer data issues (alerts owners).
 
-Validates phone numbers from both form and API sources to ensure deliverability.
+Self-Cleaning: Automated jobs wipe stale transaction data every 48 hours to keep the database lean.
 
-Sends specific, actionable alerts to developers (for technical issues) and business owners (for customer data issues).
+Tech Stack
+Engine: Python (Flask) on GCP Cloud Run.
 
-Prevents duplicate processing of multi-item transactions.
+Database: GCP Firestore for temporary state and duplicate prevention.
 
-Automated Database Cleanup: A scheduled job runs every 48 hours to clear out stale data from Firestore, ensuring the database remains clean and efficient.
+Security: All API keys and environment variables are managed via GCP Secret Manager and Cloudflare Secrets.
 
-Architecture
-The application is built on a modern, serverless stack, ensuring high availability and cost-efficiency (pay-per-use).
+Integrations: Vagaro Webhooks, Twilio Programmable SMS, and RemoteLock Connect API.
 
-Compute: Python Flask application running on GCP Cloud Run.
+Endpoints
+POST /webhook-form: Captures member info from Vagaro forms.
 
-Database: GCP Firestore is used for temporary storage of form data, PIN change tickets, and processed transaction IDs.
+POST /webhook-transaction: The main engine that processes purchases and sends codes.
 
-Secrets Management: All API keys and sensitive credentials are securely stored and managed in GCP Secret Manager.
+POST /webhook-sms: Manages incoming PIN change requests.
 
-Scheduling: GCP Cloud Scheduler is used to trigger the automated database cleanup job.
-
-External APIs:
-
-Vagaro: For receiving form and transaction webhooks.
-
-Twilio: For sending and receiving SMS messages.
-
-RemoteLock: For creating and managing physical door codes.
-
-API Endpoints
-The service exposes several secure webhook endpoints:
-
-POST /webhook-form: Receives new member information from a Vagaro form submission and stores it in Firestore.
-
-POST /webhook-transaction: Receives purchase notifications from Vagaro. This is the core endpoint that triggers the door code generation logic.
-
-POST /webhook-sms: Receives incoming text messages from members via Twilio to handle PIN change requests.
-
-POST /cleanup-firestore: A secure endpoint triggered by Cloud Scheduler to perform routine database maintenance.
-
-GET /health: A simple health check endpoint to confirm the service is running.
-
-Setup & Configuration
-For the service to run correctly, the following secrets must be configured in GCP Secret Manager:
-
-VAGARO_CLIENT_ID
-
-VAGARO_CLIENT_SECRET
-
-BUSINESS_ID
-
-REMOTELOCK_CLIENT_ID
-
-REMOTELOCK_CLIENT_SECRET
-
-TRANSACTION_TOKEN (Vagaro transaction webhook signature)
-
-FORUM_TOKEN (Vagaro form webhook signature)
-
-CLEANUP_TOKEN (A secure, self-generated token for the cleanup job)
-
-LOCK_ID (The specific ID for the door lock in RemoteLock)
-
-TOKEN_URL (The RemoteLock OAuth token URL)
-
-TWILIO_ACCOUNT_SID
-
-TWILIO_AUTH_TOKEN
-
-TWILIO_PHONE_NUMBER
-
-DEVELOPER_PHONE_NUMBER
-
-OWNER_PHONE_NUMBER_1
-
-OWNER_PHONE_NUMBER_2
+POST /cleanup-firestore: Maintenance task triggered by Cloud Scheduler.
