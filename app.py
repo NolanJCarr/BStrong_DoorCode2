@@ -64,7 +64,6 @@ def transaction_webhook():
         print(f"Bad signature received: {sig}")
         abort(403, "Forbidden: Invalid signature.")
 
-
     data = request.get_json(silent=True)
     if not data or "payload" not in data:
         return "Invalid payload", 400
@@ -73,7 +72,6 @@ def transaction_webhook():
     item_sold = payload.get("itemSold", "").lower()
     customer_id = payload.get("customerId")
 
-    print(f"Received transaction: {item_sold} for customerId: '[{customer_id}]'")
     if customer_id and customer_id.strip() == miscCustomerID:
         print("Ignoring transaction for POS Miscellaneous account.")
         return "POS Miscellaneous transaction ignored", 200
@@ -84,8 +82,9 @@ def transaction_webhook():
     is_package_day_pass = purchase_type == "Package" and item_sold == "day pass"
 
     if not (is_membership_or_autopay or is_class_day_pass or is_package_day_pass):
-        print(f"Ignoring non-membership/day pass purchase: Type='{purchase_type}', Item='{item_sold}'")
         return "Not a relevant purchase type", 200
+
+    print(f"Received VALID transaction: {item_sold} for customerId: '[{customer_id}]'")
 
     unique_id = payload.get("userPaymentId")
     if not unique_id:
@@ -167,11 +166,11 @@ def transaction_webhook():
         except Exception as e:
             print(f"Failed to get customer details via API fallback: {e}")
             customer_name = f"{first or 'Unknown'} {last or 'Customer'}"
-            #send_sms(to_phone_number=Owner1, body=f"Failed to send code to {customer_name}", to_phone_number_2=Owner2)
+            send_sms(to_phone_number=Owner1, body=f"Failed to send code to {customer_name}", to_phone_number_2=Owner2)
             return "Error fetching customer data", 500
 
     if not (first and last and phone):
-        #send_sms(to_phone_number=Owner1, body=f"{first or 'Unknown'} {last or 'Customer'} didn't get a door code", to_phone_number_2=Owner2)
+        send_sms(to_phone_number=Owner1, body=f"{first or 'Unknown'} {last or 'Customer'} didn't get a door code", to_phone_number_2=Owner2)
         return "Incomplete customer data", 500
 
     print(f"Processing purchase for {first} {last}: ({item_sold})")
@@ -188,6 +187,7 @@ def transaction_webhook():
                 print(f"Failed to create PIN change ticket for {phone}: {e}")
                 send_Dev(f"Failed to create PIN ticket for {phone}: {e}")
         return "Door code created successfully", 200
+    
     else:
         send_sms(to_phone_number=Owner1, body=f"{first} {last} didn't get a door code.", to_phone_number_2=Owner2)
         return "Failed to create door code", 500
@@ -279,7 +279,7 @@ def cleanup_firestore():
     try:
         all_tickets = dataBase.getAllOldDocs()
         deleted_count = 0
-        batch = dataBase.batch()
+        batch = dataBase.getBatch()
         
         for doc in all_tickets:
             batch.delete(doc.reference)

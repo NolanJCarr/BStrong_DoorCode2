@@ -3,6 +3,7 @@ from api_clients import get_remotelock_token
 from config import MEMBERSHIP_DURATIONS, Config, send_Dev, send_sms
 from datetime import datetime, timedelta, time
 from google.cloud import firestore
+from google.cloud.firestore_v1.base_query import FieldFilter
 
 
 class DataBase:
@@ -37,9 +38,11 @@ class DataBase:
     def getAllOldDocs(self):
         two_days_ago = datetime.now(pytz.utc) - timedelta(days=2)
 
-        docs_pending = self.database.collection('pending_customers').where('timestamp', '<', two_days_ago).get()
-        docs_tickets = self.database.collection('pin_change_tickets').where('timestamp', '<', two_days_ago).get()
-        docs_transactions = self.database.collection('processed_transactions').where('timestamp', '<', two_days_ago).get()
+        filter_condition = FieldFilter('timestamp', '<', two_days_ago)
+
+        docs_pending = self.database.collection('pending_customers').where(filter=filter_condition).get()
+        docs_tickets = self.database.collection('pin_change_tickets').where(filter=filter_condition).get()
+        docs_transactions = self.database.collection('processed_transactions').where(filter=filter_condition).get()
         return docs_pending + docs_tickets + docs_transactions
 
     def getBatch(self):

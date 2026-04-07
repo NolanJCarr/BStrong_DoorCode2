@@ -1,4 +1,4 @@
-import requests, time, json
+import requests, time
 from datetime import datetime, timedelta, timezone
 from config import Config, send_Dev
 
