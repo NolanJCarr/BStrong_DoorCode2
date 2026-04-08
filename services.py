@@ -1,4 +1,4 @@
-import pytz, requests
+import pytz, requests, calendar
 from api_clients import get_remotelock_token
 from config import MEMBERSHIP_DURATIONS, Config, send_Dev, send_sms
 from datetime import datetime, timedelta, time
@@ -49,7 +49,7 @@ class DataBase:
         return self.database.batch()
     
 
-def createDoorCode(first, last, phone, membership_type):
+def createDoorCode(first, last, phone, membership_type, force_end_utc=None):
     access_token = get_remotelock_token()
     if not access_token:
         return (False, None)
@@ -70,14 +70,16 @@ def createDoorCode(first, last, phone, membership_type):
     start_time_est = est.localize(datetime.combine(start_day, time(4, 0)))
     start_utc = start_time_est.replace(tzinfo=pytz.UTC)
 
-    if "day pass" in membership_type.lower():
+    if force_end_utc:
+        end_utc = force_end_utc
+    elif "day pass" in membership_type.lower():
         end_time_est = est.localize(datetime.combine(start_day, time(22, 0)))
+        end_utc = end_time_est.replace(tzinfo=pytz.UTC)
     else:
         duration = MEMBERSHIP_DURATIONS.get(membership_type.lower(), timedelta(days=0))
         end_moment_est = start_time_est + duration
         end_time_est = est.localize(datetime.combine(end_moment_est.date(), time(22, 0)))
-    
-    end_utc = end_time_est.replace(tzinfo=pytz.UTC)
+        end_utc = end_time_est.replace(tzinfo=pytz.UTC)
 
     payload = {
         "type": "access_guest",
@@ -126,3 +128,66 @@ def createDoorCode(first, last, phone, membership_type):
     
     sms_sent = send_sms(to_phone_number=phone, body=sms_body, first_name=first, last_name=last)
     return (sms_sent, guest_id)
+
+
+
+def extendRemoteLockCode(guest_id, new_expiration_datetime):
+    access_token = get_remotelock_token()
+    if not access_token:
+        return False
+
+    payload = {
+        "attributes": {
+            "ends_at": new_expiration_datetime.isoformat() 
+        }
+    }
+
+    hdr = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/vnd.lockstate+json; version=1",
+        "Content-Type": "application/json"
+    }
+
+    try:
+        url = f"https://api.remotelock.com/access_persons/{guest_id}"
+        response = requests.put(url, json=payload, headers=hdr, timeout=10)
+        response.raise_for_status()
+        print(f"Successfully extended RemoteLock code for guest {guest_id} to {new_expiration_datetime}")
+        return True
+
+    except requests.exceptions.RequestException as e:
+        print(f"RemoteLock API error extending guest {guest_id}: {e}")
+        send_Dev(f"RemoteLock API error extending {guest_id}: {e.response.text if e.response else e}")
+        return False
+    
+
+
+def get_next_month_anniversary(existing_utc_expiry=None):
+    est = pytz.timezone("US/Eastern")
+    
+    if existing_utc_expiry:
+        start_date = existing_utc_expiry.astimezone(est).date()
+    else:
+        # NEW PURCHASE: Apply the 10 PM rule to determine the true start date
+        current_time_est = datetime.now(est)
+        if current_time_est.hour < 22:
+            start_date = current_time_est.date()
+        else:
+            start_date = current_time_est.date() + timedelta(days=1)
+            
+    # Calculate the exact next month and year
+    next_month = (start_date.month % 12) + 1
+    next_year = start_date.year + (start_date.month // 12)
+    
+    # Find max days in next month to handle short months (e.g., snapping Jan 31 -> Feb 28)
+    _, max_days = calendar.monthrange(next_year, next_month)
+    target_day = min(start_date.day, max_days)
+    
+    # Get the exact date next month (NO grace period)
+    target_date = datetime(next_year, next_month, target_day).date()
+    
+    # Force the time to be exactly 10:00 PM (22:00) EST
+    end_time_est = est.localize(datetime.combine(target_date, time(22, 0)))
+    
+    # Convert to UTC for Firestore and RemoteLock
+    return end_time_est.astimezone(pytz.UTC)

@@ -1,8 +1,8 @@
 import os, requests, re, pytz, jwt, base64
 from flask import Flask, request, abort
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from config import Config, send_sms, send_Dev, phoneNumberFixer
-from services import DataBase, createDoorCode
+from services import DataBase, createDoorCode, extendRemoteLockCode, get_next_month_anniversary
 from api_clients import get_vagaro_customer_details, get_remotelock_token
 from google.cloud import firestore
 from twilio.request_validator import RequestValidator
@@ -90,7 +90,6 @@ def transaction_webhook():
     if not unique_id:
         unique_id = payload.get("transactionId")
 
-
     if dataBase.checkIfExists('processed_transactions', unique_id):
         print(f"Duplicate transaction detected: {unique_id}. Skipping.")
         return "Duplicate transaction", 200
@@ -99,7 +98,6 @@ def transaction_webhook():
         dataBase.add('processed_transactions', unique_id, {'timestamp': firestore.SERVER_TIMESTAMP})
     except Exception as e:
         print(f"Error saving transaction to Firestore: {e}")
-
 
     first = None
     last = None
@@ -131,12 +129,10 @@ def transaction_webhook():
         else:
             print(f"No pending form data for customer {customer_id}. Using API fallback.")
     
-    
     except Exception as e:
         print(f"Error accessing Firestore for customer {customer_id}: {e}. Using API fallback.")
         send_Dev(f"Firestore access error for {customer_id}: {e}")
 
-    
     if not phone_is_valid:
         try:
             print(f"Executing API fallback for customer {customer_id}. with name: ({first}) ({last})")
@@ -174,8 +170,49 @@ def transaction_webhook():
         return "Incomplete customer data", 500
 
     print(f"Processing purchase for {first} {last}: ({item_sold})")
-    success, guest_id = createDoorCode(first, last, phone, item_sold)
     
+    # Adjust this string match to whatever Vagaro exactly calls the item
+    if "12 month" in item_sold and "autopay" in item_sold:
+        
+        autopay_doc = dataBase.getData('active_autopays', customer_id)
+
+        if autopay_doc.exists:
+            print(f"Existing 12-month autopay found for {first} {last}. Extending code.")
+            autopay_data = autopay_doc.to_dict()
+            guest_id = autopay_data.get('remote_lock_id')
+            current_expiry = autopay_data.get('expireAt')
+
+            new_expiration = get_next_month_anniversary(current_expiry)
+            extension_success = extendRemoteLockCode(guest_id, new_expiration)
+
+            if extension_success:
+                dataBase.update('active_autopays', customer_id, {'expireAt': new_expiration})
+                send_sms(to_phone_number=phone, body=f"{first}, you're B-Strong monthly payment was received and your door code has been extended")
+                return "Autopay code extended", 200
+            else:
+                send_sms(to_phone_number=Owner1, body=f"Failed to extend RemoteLock code for {first} {last}.", to_phone_number_2=Owner2)
+                return "Failed to extend code", 500
+
+        else:
+            print(f"First month of 12-month autopay for {first} {last}. Creating new code.")
+            
+            new_expiration = get_next_month_anniversary()
+            success, guest_id = createDoorCode(first, last, phone, item_sold, force_end_utc=new_expiration)
+
+            if success:
+                dataBase.add('active_autopays', customer_id, {
+                    'remote_lock_id': guest_id,
+                    'expireAt': new_expiration,
+                    'phone': phone,
+                    'first_name': first,
+                    'last_name': last
+                })
+                return "First month autopay code created", 200
+            else:
+                send_sms(to_phone_number=Owner1, body=f"{first} {last} didn't get a door code for their new autopay.", to_phone_number_2=Owner2)
+                return "Failed to create first month code", 500
+    
+    success, guest_id = createDoorCode(first, last, phone, item_sold)
     
     if success:
         is_day_pass = "day pass" in item_sold
