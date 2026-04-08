@@ -87,7 +87,7 @@ def createDoorCode(first, last, phone, membership_type, force_end_utc=None):
             "name": f"{first} {last}",
             "generate_pin": True,
             "starts_at": start_utc.isoformat(),
-            "ends_at": end_utc.isoformat()
+            "ends_at": end_utc.isoformat().replace("+00:00", "Z")
         }
     }
     hdr = {
@@ -138,7 +138,7 @@ def extendRemoteLockCode(guest_id, new_expiration_datetime):
 
     payload = {
         "attributes": {
-            "ends_at": new_expiration_datetime.isoformat() 
+            "ends_at": new_expiration_datetime.isoformat().replace("+00:00", "Z") 
         }
     }
 

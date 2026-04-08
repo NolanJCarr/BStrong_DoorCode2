@@ -13,9 +13,6 @@ MEMBERSHIP_DURATIONS = {
     "1 month gym membership": timedelta(days=30),
     "12 month autopay": timedelta(days=31),
     "best rate!!! one year (pif)": timedelta(days=365),
-    "2 month gym membership": timedelta(days=60),
-    "3 month gym membership": timedelta(days=90),
-    "6 month gym membership": timedelta(days=180),
     "day pass (not a class) - 4am-10pm for one individual, for one calendar day.": timedelta(days=0),
     "day pass": timedelta(days=0)
 }

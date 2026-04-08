@@ -23,7 +23,7 @@ def form_webhook():
         abort(403, "Invalid X-Vagaro-Signature")
 
 
-    data = request.json
+    data = request.get_json(silent=True)
     if not data or "payload" not in data:
         return "No valid payload found", 400
 
@@ -171,7 +171,7 @@ def transaction_webhook():
 
     print(f"Processing purchase for {first} {last}: ({item_sold})")
     
-    # Adjust this string match to whatever Vagaro exactly calls the item
+    
     if "12 month" in item_sold and "autopay" in item_sold:
         
         autopay_doc = dataBase.getData('active_autopays', customer_id)
@@ -187,7 +187,12 @@ def transaction_webhook():
 
             if extension_success:
                 dataBase.update('active_autopays', customer_id, {'expireAt': new_expiration})
-                send_sms(to_phone_number=phone, body=f"{first}, you're B-Strong monthly payment was received and your door code has been extended")
+                
+                est = pytz.timezone("US/Eastern")
+                exp_date_str = new_expiration.astimezone(est).strftime('%Y-%m-%d')
+                
+                sms_body = f"{first}, your B-Strong monthly payment was received and your door code has been extended and will now expire {exp_date_str} at 10:00 pm."
+                send_sms(to_phone_number=phone, body=sms_body)
                 return "Autopay code extended", 200
             else:
                 send_sms(to_phone_number=Owner1, body=f"Failed to extend RemoteLock code for {first} {last}.", to_phone_number_2=Owner2)
@@ -264,7 +269,7 @@ def smsPinChanges():
         dataBase.delete('pin_change_tickets', from_number)
         return "Ticket expired.", 200
 
-    cleaned_pin = body.replace('#', '')
+    cleaned_pin = body.replace('#', '').strip()
     if not re.match(r'^\d{4,5}$', cleaned_pin):
         send_sms(to_phone_number=from_number, body="Invalid reponse. Please try again with just the 4 or 5 numbers you'd like for your door code.")
         return "Invalid PIN format.", 200
