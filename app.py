@@ -14,6 +14,39 @@ Owner2 = Config.get("OWNER_PHONE_NUMBER_2")
 miscCustomerID = Config.get("MISC_PERSON_CUSTID")
 dataBase = DataBase()
 
+# --- Daily Cron Job for Expirations ----------------------
+@app.route("/cron-expire", methods=['POST'])
+def cron_expire_memberships():
+    # Uses your existing CLEANUP_TOKEN for security
+    expected_token = Config.get("CLEANUP_TOKEN")
+    received_token = request.headers.get("X-Cron-Token")
+    
+    if received_token != expected_token:
+        abort(403, "Invalid cron token")
+
+    try:
+        expired_docs = dataBase.getExpiredAutopays()
+        count = 0
+        
+        for doc in expired_docs:
+            data = doc.to_dict()
+            phone = data.get('phone')
+            
+            if phone:
+                sms_body = f"Your B-Strong membership has expired because no payment was received for this month"
+                send_sms(to_phone_number=phone, body=sms_body)
+            
+            dataBase.delete('active_autopays', doc.id)
+            count += 1
+
+        print(f"Cron success. Processed and texted {count} expired autopay members.")
+        return f"Processed {count} expirations.", 200
+
+    except Exception as e:
+        print(f"Error during expiration cron job: {e}")
+        send_Dev(f"Expiration cron job failed: {e}")
+        return "Error during cron execution", 500
+
 # --- Form Webhook Handler ----------------------------------------------
 @app.route("/webhook-form", methods=['POST'])
 def form_webhook():
@@ -172,7 +205,7 @@ def transaction_webhook():
     print(f"Processing purchase for {first} {last}: ({item_sold})")
     
     
-    if "12 month" in item_sold and "autopay" in item_sold:
+    if "monthly" in item_sold and "autopay" in item_sold:
         
         autopay_doc = dataBase.getData('active_autopays', customer_id)
 
@@ -201,13 +234,21 @@ def transaction_webhook():
         else:
             print(f"First month of 12-month autopay for {first} {last}. Creating new code.")
             
-            new_expiration = get_next_month_anniversary()
-            success, guest_id = createDoorCode(first, last, phone, item_sold, force_end_utc=new_expiration)
+            base_date = get_next_month_anniversary()
+            
+            remote_lock_utc = base_date.replace(hour=22, minute=0, second=0, microsecond=0, tzinfo=pytz.UTC)
+            
+            # 2. Firestore Time: 10:00 PM Eastern Time
+            eastern = pytz.timezone('America/New_York')
+            firestore_est = eastern.localize(base_date.replace(hour=22, minute=0, second=0, microsecond=0, tzinfo=None))
+
+            # Pass the UTC time to RemoteLock
+            success, guest_id = createDoorCode(first, last, phone, item_sold, force_end_utc=remote_lock_utc)
 
             if success:
                 dataBase.add('active_autopays', customer_id, {
                     'remote_lock_id': guest_id,
-                    'expireAt': new_expiration,
+                    'expireAt': firestore_est,
                     'phone': phone,
                     'first_name': first,
                     'last_name': last

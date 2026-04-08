@@ -26,6 +26,10 @@ class DataBase:
         else:
             reference.set({})
         return f"successfully added key: {key} to the collection: {collection}. With the data: {data}", 200
+
+    def update(self, collection, key, data):
+        reference = self.database.collection(collection).document(key)
+        reference.update(data)
     
     def getData(self, collection, key):
         reference = self.database.collection(collection).document(key)
@@ -47,6 +51,11 @@ class DataBase:
 
     def getBatch(self):
         return self.database.batch()
+    
+    def getExpiredAutopays(self):
+        now = datetime.now(pytz.utc)
+        filter_condition = FieldFilter('expireAt', '<=', now)
+        return self.database.collection('active_autopays').where(filter=filter_condition).get()
     
 
 def createDoorCode(first, last, phone, membership_type, force_end_utc=None):
@@ -166,7 +175,8 @@ def get_next_month_anniversary(existing_utc_expiry=None):
     est = pytz.timezone("US/Eastern")
     
     if existing_utc_expiry:
-        start_date = existing_utc_expiry.astimezone(est).date()
+        # Grab the raw date directly since it's saved as "fake UTC"
+        start_date = existing_utc_expiry.date()
     else:
         # NEW PURCHASE: Apply the 10 PM rule to determine the true start date
         current_time_est = datetime.now(est)
@@ -189,5 +199,5 @@ def get_next_month_anniversary(existing_utc_expiry=None):
     # Force the time to be exactly 10:00 PM (22:00) EST
     end_time_est = est.localize(datetime.combine(target_date, time(22, 0)))
     
-    # Convert to UTC for Firestore and RemoteLock
-    return end_time_est.astimezone(pytz.UTC)
+    # Convert to "Fake UTC" using replace() to match RemoteLock's quirk
+    return end_time_est.replace(tzinfo=pytz.UTC)
