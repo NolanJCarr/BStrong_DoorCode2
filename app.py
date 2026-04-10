@@ -255,11 +255,14 @@ def transaction_webhook():
             if extension_success:
                 # 2. Give Firestore the true EST time
                 dataBase.update('active_autopays', customer_id, {'expireAt': firestore_time})
+
+                dataBase.add('pin_change_tickets', phone, {'remote_lock_id': guest_id, 'timestamp': firestore.SERVER_TIMESTAMP})
+                print(f"Created PIN change ticket for {first} {last} with number: {phone}")
                 
                 # Format string using the localized firestore_time
                 exp_date_str = firestore_time.strftime('%Y-%m-%d')
                 
-                sms_body = f"{first}, your B-Strong monthly payment was received and your door code has been extended and will now expire {exp_date_str} at 10:00 pm."
+                sms_body = f"{first}, your B-Strong monthly payment was received and your door code has been extended and will now expire {exp_date_str} at 10:00 pm. If you'd like to change your PIN, reply to this message with a 4 or 5 digit number within the next 48 hours."
                 send_sms(to_phone_number=phone, body=sms_body)
                 return "Autopay code extended", 200
             else:
@@ -283,6 +286,8 @@ def transaction_webhook():
                     'first_name': first,
                     'last_name': last
                 })
+                dataBase.add('pin_change_tickets', phone, {'remote_lock_id': guest_id, 'timestamp': firestore.SERVER_TIMESTAMP})
+                print(f"Created PIN change ticket for {first} {last} with number: {phone}")
                 return "First month autopay code created", 200
             else:
                 send_sms(to_phone_number=Owner1, body=f"{first} {last} didn't get a door code for their new autopay.", to_phone_number_2=Owner2)
