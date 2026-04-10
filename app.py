@@ -47,6 +47,39 @@ def cron_expire_memberships():
         send_Dev(f"Expiration cron job failed: {e}")
         return "Error during cron execution", 500
 
+# --- Daily Cron Job for Expirations ----------------------
+@app.route("/cron-expire", methods=['POST'])
+def cron_expire_memberships():
+    # Uses your existing CLEANUP_TOKEN for security
+    expected_token = Config.get("CLEANUP_TOKEN")
+    received_token = request.headers.get("X-Cron-Token")
+    
+    if received_token != expected_token:
+        abort(403, "Invalid cron token")
+
+    try:
+        expired_docs = dataBase.getExpiredAutopays()
+        count = 0
+        
+        for doc in expired_docs:
+            data = doc.to_dict()
+            phone = data.get('phone')
+            
+            if phone:
+                sms_body = f"Your B-Strong membership has expired because no payment was received for this month"
+                send_sms(to_phone_number=phone, body=sms_body)
+            
+            dataBase.delete('active_autopays', doc.id)
+            count += 1
+
+        print(f"Cron success. Processed and texted {count} expired autopay members.")
+        return f"Processed {count} expirations.", 200
+
+    except Exception as e:
+        print(f"Error during expiration cron job: {e}")
+        send_Dev(f"Expiration cron job failed: {e}")
+        return "Error during cron execution", 500
+
 # --- Form Webhook Handler ----------------------------------------------
 @app.route("/webhook-form", methods=['POST'])
 def form_webhook():
@@ -56,6 +89,7 @@ def form_webhook():
         abort(403, "Invalid X-Vagaro-Signature")
 
 
+    data = request.get_json(silent=True)
     data = request.get_json(silent=True)
     if not data or "payload" not in data:
         return "No valid payload found", 400
@@ -73,12 +107,44 @@ def form_webhook():
 
     try:
         questions = payload["questionsAndAnswers"]
+
+        print(f"DEBUG RAW QUESTIONS FOR {customer_id}: {questions}")
+        
+        first_name = None
+        last_name = None
+        phone_number = None
+        for q in questions:
+            question_text = q.get("question", "")
+            answers_list = q.get("answer", [])
+            
+            # If the answer array is empty (like the instructions block), skip it and move to the next one
+            if not answers_list:
+                continue
+            
+            try:
+                # Grab the raw answer 
+                raw_answer = answers_list[0]
+                
+                # Strip out HTML tags from Vagaro's payload
+                clean_answer = re.sub(r'<[^>]+>', '', raw_answer).strip()
+
+                if "First Name" in question_text:
+                    first_name = clean_answer
+                elif "Last Name" in question_text:
+                    last_name = clean_answer
+                elif "CELL #" in question_text:
+                    phone_number = clean_answer
+            except IndexError:
+                print(f"INDEX ERROR on this specific question: {q}")
+
         Person = { 
-            'first_name' : questions[0]["answer"][0], 
-            'last_name' : questions[1]["answer"][0],
-            'phone_number': questions[2]["answer"][0],
+            'first_name' : first_name, 
+            'last_name' : last_name,
+            'phone_number': phone_number,
             'timestamp': firestore.SERVER_TIMESTAMP
         }
+
+
         dataBase.add(collection='pending_customers', key=customer_id, data=Person)
         return "Success", 200
 
@@ -112,10 +178,13 @@ def transaction_webhook():
     purchase_type = payload.get("purchaseType")
     is_membership_or_autopay = purchase_type == "Membership"
     is_class_day_pass = purchase_type == "Class" and "day pass" in item_sold and "4am-10pm" in item_sold
+    is_class_day_pass = purchase_type == "Class" and "day pass" in item_sold and "4am-10pm" in item_sold
     is_package_day_pass = purchase_type == "Package" and item_sold == "day pass"
 
     if not (is_membership_or_autopay or is_class_day_pass or is_package_day_pass):
         return "Not a relevant purchase type", 200
+
+    print(f"Received VALID transaction: {item_sold} for customerId: '[{customer_id}]'")
 
     print(f"Received VALID transaction: {item_sold} for customerId: '[{customer_id}]'")
 
@@ -150,7 +219,12 @@ def transaction_webhook():
                 phone_result = phoneNumberFixer(phone_raw_from_firestore)
                 
                 if phone_result.get('valid'):
+                phone_result = phoneNumberFixer(phone_raw_from_firestore)
+                
+                if phone_result.get('valid'):
                     phone_is_valid = True
+                    phone = phone_result.get('number') 
+                    print(f"Valid phone number '{phone}' found in Firestore.")
                     phone = phone_result.get('number') 
                     print(f"Valid phone number '{phone}' found in Firestore.")
 
@@ -165,6 +239,7 @@ def transaction_webhook():
     except Exception as e:
         print(f"Error accessing Firestore for customer {customer_id}: {e}. Using API fallback.")
         send_Dev(f"Firestore access error for {customer_id}: {e}")
+
 
     if not phone_is_valid:
         try:
@@ -196,9 +271,11 @@ def transaction_webhook():
             print(f"Failed to get customer details via API fallback: {e}")
             customer_name = f"{first or 'Unknown'} {last or 'Customer'}"
             send_sms(to_phone_number=Owner1, body=f"Failed to send code to {customer_name}", to_phone_number_2=Owner2)
+            send_sms(to_phone_number=Owner1, body=f"Failed to send code to {customer_name}", to_phone_number_2=Owner2)
             return "Error fetching customer data", 500
 
     if not (first and last and phone):
+        send_sms(to_phone_number=Owner1, body=f"{first or 'Unknown'} {last or 'Customer'} didn't get a door code", to_phone_number_2=Owner2)
         send_sms(to_phone_number=Owner1, body=f"{first or 'Unknown'} {last or 'Customer'} didn't get a door code", to_phone_number_2=Owner2)
         return "Incomplete customer data", 500
 
@@ -215,14 +292,17 @@ def transaction_webhook():
             guest_id = autopay_data.get('remote_lock_id')
             current_expiry = autopay_data.get('expireAt')
 
-            new_expiration = get_next_month_anniversary(current_expiry)
-            extension_success = extendRemoteLockCode(guest_id, new_expiration)
+            rl_time, firestore_time = get_next_month_anniversary(current_expiry)
+            
+            # 1. Give RemoteLock the "Fake UTC" time
+            extension_success = extendRemoteLockCode(guest_id, rl_time)
 
             if extension_success:
-                dataBase.update('active_autopays', customer_id, {'expireAt': new_expiration})
+                # 2. Give Firestore the true EST time
+                dataBase.update('active_autopays', customer_id, {'expireAt': firestore_time})
                 
-                est = pytz.timezone("US/Eastern")
-                exp_date_str = new_expiration.astimezone(est).strftime('%Y-%m-%d')
+                # Format string using the localized firestore_time
+                exp_date_str = firestore_time.strftime('%Y-%m-%d')
                 
                 sms_body = f"{first}, your B-Strong monthly payment was received and your door code has been extended and will now expire {exp_date_str} at 10:00 pm."
                 send_sms(to_phone_number=phone, body=sms_body)
@@ -234,21 +314,16 @@ def transaction_webhook():
         else:
             print(f"First month of 12-month autopay for {first} {last}. Creating new code.")
             
-            base_date = get_next_month_anniversary()
-            
-            remote_lock_utc = base_date.replace(hour=22, minute=0, second=0, microsecond=0, tzinfo=pytz.UTC)
-            
-            # 2. Firestore Time: 10:00 PM Eastern Time
-            eastern = pytz.timezone('America/New_York')
-            firestore_est = eastern.localize(base_date.replace(hour=22, minute=0, second=0, microsecond=0, tzinfo=None))
+            rl_time, firestore_time = get_next_month_anniversary()
 
-            # Pass the UTC time to RemoteLock
-            success, guest_id = createDoorCode(first, last, phone, item_sold, force_end_utc=remote_lock_utc)
+            # Pass the fake UTC time to RemoteLock
+            success, guest_id = createDoorCode(first, last, phone, item_sold, force_end_utc=rl_time)
 
             if success:
+                # Save the True EST time to Firestore
                 dataBase.add('active_autopays', customer_id, {
                     'remote_lock_id': guest_id,
-                    'expireAt': firestore_est,
+                    'expireAt': firestore_time,
                     'phone': phone,
                     'first_name': first,
                     'last_name': last
@@ -270,6 +345,7 @@ def transaction_webhook():
                 print(f"Failed to create PIN change ticket for {phone}: {e}")
                 send_Dev(f"Failed to create PIN ticket for {phone}: {e}")
         return "Door code created successfully", 200
+    
     
     else:
         send_sms(to_phone_number=Owner1, body=f"{first} {last} didn't get a door code.", to_phone_number_2=Owner2)
@@ -311,8 +387,9 @@ def smsPinChanges():
         return "Ticket expired.", 200
 
     cleaned_pin = body.replace('#', '').strip()
+    cleaned_pin = body.replace('#', '').strip()
     if not re.match(r'^\d{4,5}$', cleaned_pin):
-        send_sms(to_phone_number=from_number, body="Invalid reponse. Please try again with just the 4 or 5 numbers you'd like for your door code.")
+        send_sms(to_phone_number=from_number, body="Invalid response. Please try again with just the 4 or 5 numbers you'd like for your door code.")
         return "Invalid PIN format.", 200
 
     access_token = get_remotelock_token()
@@ -362,6 +439,7 @@ def cleanup_firestore():
     try:
         all_tickets = dataBase.getAllOldDocs()
         deleted_count = 0
+        batch = dataBase.getBatch()
         batch = dataBase.getBatch()
         
         for doc in all_tickets:
