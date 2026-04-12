@@ -84,6 +84,9 @@ def createDoorCode(first, last, phone, membership_type, force_end_utc=None):
     elif "day pass" in membership_type.lower():
         end_time_est = est.localize(datetime.combine(start_day, time(22, 0)))
         end_utc = end_time_est.replace(tzinfo=pytz.UTC)
+    elif "1 month" in membership_type.lower():
+        rl_time, _ = get_next_month_anniversary()
+        end_utc = rl_time
     else:
         duration = MEMBERSHIP_DURATIONS.get(membership_type.lower(), timedelta(days=0))
         end_moment_est = start_time_est + duration
@@ -171,33 +174,35 @@ def extendRemoteLockCode(guest_id, new_expiration_datetime):
     
 
 
-def get_next_month_anniversary(existing_utc_expiry=None):
+def get_next_month_anniversary(existing_expiry=None):
     est = pytz.timezone("US/Eastern")
     
-    if existing_utc_expiry:
-        # Grab the raw date directly since it's saved as "fake UTC"
-        start_date = existing_utc_expiry.date()
+    if existing_expiry:
+        # 1. Convert Firestore UTC to EST *before* extracting the date.
+        # This stops May 8th 10:00 PM from rolling over into May 9th UTC.
+        est_time = existing_expiry.astimezone(est)
+        start_date = est_time.date() 
     else:
-        # NEW PURCHASE: Apply the 10 PM rule to determine the true start date
         current_time_est = datetime.now(est)
         if current_time_est.hour < 22:
             start_date = current_time_est.date()
         else:
             start_date = current_time_est.date() + timedelta(days=1)
             
-    # Calculate the exact next month and year
+    # Calculate next month and year
     next_month = (start_date.month % 12) + 1
     next_year = start_date.year + (start_date.month // 12)
     
-    # Find max days in next month to handle short months (e.g., snapping Jan 31 -> Feb 28)
     _, max_days = calendar.monthrange(next_year, next_month)
     target_day = min(start_date.day, max_days)
-    
-    # Get the exact date next month (NO grace period)
     target_date = datetime(next_year, next_month, target_day).date()
     
-    # Force the time to be exactly 10:00 PM (22:00) EST
-    end_time_est = est.localize(datetime.combine(target_date, time(22, 0)))
+    # 2. REMOTELOCK TIME: 10:00 PM "Fake UTC"
+    # We force this to be UTC 22:00 so RemoteLock reads it as 10 PM.
+    remotelock_expiry = datetime.combine(target_date, time(22, 0)).replace(tzinfo=pytz.UTC)
     
-    # Convert to "Fake UTC" using replace() to match RemoteLock's quirk
-    return end_time_est.replace(tzinfo=pytz.UTC)
+    # 3. FIRESTORE TIME: 10:05 PM True EST/EDT
+    # We localize this to Eastern time so Firestore handles the timezone math perfectly.
+    firestore_expiry = est.localize(datetime.combine(target_date, time(22, 5)))
+    
+    return remotelock_expiry, firestore_expiry

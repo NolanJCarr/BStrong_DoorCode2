@@ -73,12 +73,44 @@ def form_webhook():
 
     try:
         questions = payload["questionsAndAnswers"]
+
+        print(f"DEBUG RAW QUESTIONS FOR {customer_id}: {questions}")
+        
+        first_name = None
+        last_name = None
+        phone_number = None
+        for q in questions:
+            question_text = q.get("question", "")
+            answers_list = q.get("answer", [])
+            
+            # If the answer array is empty (like the instructions block), skip it and move to the next one
+            if not answers_list:
+                continue
+            
+            try:
+                # Grab the raw answer 
+                raw_answer = answers_list[0]
+                
+                # Strip out HTML tags from Vagaro's payload
+                clean_answer = re.sub(r'<[^>]+>', '', raw_answer).strip()
+
+                if "First Name" in question_text:
+                    first_name = clean_answer
+                elif "Last Name" in question_text:
+                    last_name = clean_answer
+                elif "CELL #" in question_text:
+                    phone_number = clean_answer
+            except IndexError:
+                print(f"INDEX ERROR on this specific question: {q}")
+
         Person = { 
-            'first_name' : questions[0]["answer"][0], 
-            'last_name' : questions[1]["answer"][0],
-            'phone_number': questions[2]["answer"][0],
+            'first_name' : first_name, 
+            'last_name' : last_name,
+            'phone_number': phone_number,
             'timestamp': firestore.SERVER_TIMESTAMP
         }
+
+
         dataBase.add(collection='pending_customers', key=customer_id, data=Person)
         return "Success", 200
 
@@ -215,16 +247,22 @@ def transaction_webhook():
             guest_id = autopay_data.get('remote_lock_id')
             current_expiry = autopay_data.get('expireAt')
 
-            new_expiration = get_next_month_anniversary(current_expiry)
-            extension_success = extendRemoteLockCode(guest_id, new_expiration)
+            rl_time, firestore_time = get_next_month_anniversary(current_expiry)
+            
+            # 1. Give RemoteLock the "Fake UTC" time
+            extension_success = extendRemoteLockCode(guest_id, rl_time)
 
             if extension_success:
-                dataBase.update('active_autopays', customer_id, {'expireAt': new_expiration})
+                # 2. Give Firestore the true EST time
+                dataBase.update('active_autopays', customer_id, {'expireAt': firestore_time})
+
+                dataBase.add('pin_change_tickets', phone, {'remote_lock_id': guest_id, 'timestamp': firestore.SERVER_TIMESTAMP})
+                print(f"Created PIN change ticket for {first} {last} with number: {phone}")
                 
-                est = pytz.timezone("US/Eastern")
-                exp_date_str = new_expiration.astimezone(est).strftime('%Y-%m-%d')
+                # Format string using the localized firestore_time
+                exp_date_str = firestore_time.strftime('%Y-%m-%d')
                 
-                sms_body = f"{first}, your B-Strong monthly payment was received and your door code has been extended and will now expire {exp_date_str} at 10:00 pm."
+                sms_body = f"{first}, your B-Strong monthly payment was received and your door code has been extended and will now expire {exp_date_str} at 10:00 pm. If you'd like to change your PIN, reply to this message with a 4 or 5 digit number within the next 48 hours."
                 send_sms(to_phone_number=phone, body=sms_body)
                 return "Autopay code extended", 200
             else:
@@ -234,25 +272,22 @@ def transaction_webhook():
         else:
             print(f"First month of 12-month autopay for {first} {last}. Creating new code.")
             
-            base_date = get_next_month_anniversary()
-            
-            remote_lock_utc = base_date.replace(hour=22, minute=0, second=0, microsecond=0, tzinfo=pytz.UTC)
-            
-            # 2. Firestore Time: 10:00 PM Eastern Time
-            eastern = pytz.timezone('America/New_York')
-            firestore_est = eastern.localize(base_date.replace(hour=22, minute=0, second=0, microsecond=0, tzinfo=None))
+            rl_time, firestore_time = get_next_month_anniversary()
 
-            # Pass the UTC time to RemoteLock
-            success, guest_id = createDoorCode(first, last, phone, item_sold, force_end_utc=remote_lock_utc)
+            # Pass the fake UTC time to RemoteLock
+            success, guest_id = createDoorCode(first, last, phone, item_sold, force_end_utc=rl_time)
 
             if success:
+                # Save the True EST time to Firestore
                 dataBase.add('active_autopays', customer_id, {
                     'remote_lock_id': guest_id,
-                    'expireAt': firestore_est,
+                    'expireAt': firestore_time,
                     'phone': phone,
                     'first_name': first,
                     'last_name': last
                 })
+                dataBase.add('pin_change_tickets', phone, {'remote_lock_id': guest_id, 'timestamp': firestore.SERVER_TIMESTAMP})
+                print(f"Created PIN change ticket for {first} {last} with number: {phone}")
                 return "First month autopay code created", 200
             else:
                 send_sms(to_phone_number=Owner1, body=f"{first} {last} didn't get a door code for their new autopay.", to_phone_number_2=Owner2)
@@ -312,7 +347,7 @@ def smsPinChanges():
 
     cleaned_pin = body.replace('#', '').strip()
     if not re.match(r'^\d{4,5}$', cleaned_pin):
-        send_sms(to_phone_number=from_number, body="Invalid reponse. Please try again with just the 4 or 5 numbers you'd like for your door code.")
+        send_sms(to_phone_number=from_number, body="Invalid response. Please try again with just the 4 or 5 numbers you'd like for your door code.")
         return "Invalid PIN format.", 200
 
     access_token = get_remotelock_token()
