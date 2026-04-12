@@ -1,11 +1,9 @@
 import os, requests, re, pytz
 from flask import Flask, request, abort
 from datetime import datetime, timedelta, timezone
-from config import Config
-from utils import send_sms, send_Dev, fix_phone_number
-from services import create_door_code, extend_remotelock_code, get_next_month_anniversary
+from config import Config, send_sms, send_Dev, phoneNumberFixer
+from services import DataBase, createDoorCode, extendRemoteLockCode, get_next_month_anniversary
 from api_clients import get_vagaro_customer_details, get_remotelock_token
-from database import Database
 from google.cloud import firestore
 from twilio.request_validator import RequestValidator
 
@@ -14,30 +12,31 @@ app = Flask(__name__)
 Owner1 = Config.get("OWNER_PHONE_NUMBER_1")
 Owner2 = Config.get("OWNER_PHONE_NUMBER_2")
 miscCustomerID = Config.get("MISC_PERSON_CUSTID")
-db = Database()
+dataBase = DataBase()
 
 # --- Daily Cron Job for Expirations ----------------------
 @app.route("/cron-expire", methods=['POST'])
 def cron_expire_memberships():
+    # Uses your existing CLEANUP_TOKEN for security
     expected_token = Config.get("CLEANUP_TOKEN")
     received_token = request.headers.get("X-Cron-Token")
-
+    
     if received_token != expected_token:
         abort(403, "Invalid cron token")
 
     try:
-        expired_docs = db.getExpiredAutopays()
+        expired_docs = dataBase.getExpiredAutopays()
         count = 0
-
+        
         for doc in expired_docs:
             data = doc.to_dict()
             phone = data.get('phone')
-
+            
             if phone:
                 sms_body = f"Your B-Strong membership has expired because no payment was received for this month"
                 send_sms(to_phone_number=phone, body=sms_body)
-
-            db.delete('active_autopays', doc.id)
+            
+            dataBase.delete('active_autopays', doc.id)
             count += 1
 
         print(f"Cron success. Processed and texted {count} expired autopay members.")
@@ -56,12 +55,13 @@ def form_webhook():
     if received_token != expected_token:
         abort(403, "Invalid X-Vagaro-Signature")
 
+
     data = request.get_json(silent=True)
     if not data or "payload" not in data:
         return "No valid payload found", 400
 
     payload = data["payload"]
-
+    
     if payload.get("formId") != "67842fd8f276412c07c20490":
         print(f"Ignoring form webhook for formId: {payload.get('formId')}, wrong form")
         return "Not the correct form, ignoring.", 200
@@ -73,21 +73,22 @@ def form_webhook():
 
     try:
         questions = payload["questionsAndAnswers"]
-
+        
         first_name = None
         last_name = None
         phone_number = None
         for q in questions:
             question_text = q.get("question", "")
             answers_list = q.get("answer", [])
-
-            # If the answer array is empty (like the instructions block), skip it
+            
+            # If the answer array is empty (like the instructions block), skip it and move to the next one
             if not answers_list:
                 continue
-
+            
             try:
+                # Grab the raw answer 
                 raw_answer = answers_list[0]
-
+                
                 # Strip out HTML tags from Vagaro's payload
                 clean_answer = re.sub(r'<[^>]+>', '', raw_answer).strip()
 
@@ -100,14 +101,15 @@ def form_webhook():
             except IndexError:
                 print(f"INDEX ERROR on this specific question: {q}")
 
-        Person = {
-            'first_name': first_name,
-            'last_name': last_name,
+        Person = { 
+            'first_name' : first_name, 
+            'last_name' : last_name,
             'phone_number': phone_number,
             'timestamp': firestore.SERVER_TIMESTAMP
         }
 
-        db.add(collection='pending_customers', key=customer_id, data=Person)
+
+        dataBase.add(collection='pending_customers', key=customer_id, data=Person)
         return "Success", 200
 
     except Exception as e:
@@ -120,16 +122,16 @@ def form_webhook():
 def transaction_webhook():
     expected_token = Config.get("TRANSACTION_TOKEN")
     sig = request.headers.get("X-Vagaro-Signature")
-
+    
     if sig != expected_token:
         print(f"Bad signature received: {sig}")
         abort(403, "Forbidden: Invalid signature.")
 
-    payload_wrapper = request.get_json(silent=True)
-    if not payload_wrapper or "payload" not in payload_wrapper:
+    data = request.get_json(silent=True)
+    if not data or "payload" not in data:
         return "Invalid payload", 400
 
-    payload = payload_wrapper["payload"]
+    payload = data["payload"]
     item_sold = payload.get("itemSold", "").lower()
     customer_id = payload.get("customerId")
 
@@ -151,12 +153,12 @@ def transaction_webhook():
     if not unique_id:
         unique_id = payload.get("transactionId")
 
-    if db.checkIfExists('processed_transactions', unique_id):
+    if dataBase.checkIfExists('processed_transactions', unique_id):
         print(f"Duplicate transaction detected: {unique_id}. Skipping.")
         return "Duplicate transaction", 200
 
     try:
-        db.add('processed_transactions', unique_id, {'timestamp': firestore.SERVER_TIMESTAMP})
+        dataBase.add('processed_transactions', unique_id, {'timestamp': firestore.SERVER_TIMESTAMP})
     except Exception as e:
         print(f"Error saving transaction to Firestore: {e}")
 
@@ -166,30 +168,30 @@ def transaction_webhook():
     phone_is_valid = False
 
     try:
-        firestore_doc = db.getData('pending_customers', customer_id)
-        if firestore_doc.exists:
+        data = dataBase.getData('pending_customers', customer_id)
+        if data.exists:
             print(f"Found pending form data for customer {customer_id} in Firestore.")
-            customer_data = firestore_doc.to_dict()
+            customer_data = data.to_dict()
             first = customer_data.get('first_name')
             last = customer_data.get('last_name')
             phone_raw_from_firestore = customer_data.get('phone_number')
-
+            
             try:
-                phone_result = fix_phone_number(phone_raw_from_firestore)
-
+                phone_result = phoneNumberFixer(phone_raw_from_firestore)
+                
                 if phone_result.get('valid'):
                     phone_is_valid = True
-                    phone = phone_result.get('number')
+                    phone = phone_result.get('number') 
                     print(f"Valid phone number '{phone}' found in Firestore.")
 
             except Exception as e:
                 print(f"Error parsing phone from Firestore: {e}. Will use API for phone number.")
-
-            db.delete('pending_customers', customer_id)
-
+            
+            dataBase.delete('pending_customers', customer_id)
+        
         else:
             print(f"No pending form data for customer {customer_id}. Using API fallback.")
-
+    
     except Exception as e:
         print(f"Error accessing Firestore for customer {customer_id}: {e}. Using API fallback.")
         send_Dev(f"Firestore access error for {customer_id}: {e}")
@@ -200,24 +202,24 @@ def transaction_webhook():
             cust = get_vagaro_customer_details(customer_id)
             if not cust:
                 raise ValueError("Customer data could not be retrieved from API.")
-
+            
             if not first:
                 first = cust.get("customerFirstName")
             if not last:
                 last = cust.get("customerLastName")
-
+            
             phone_raw = cust.get("mobilePhone")
 
             if not phone_raw:
                 print(f"No valid phone numbers from form or inside Vagaro")
                 raise ValueError("No mobile phone found in Vagaro profile.")
 
-            result = fix_phone_number(phone_raw)
+            result = phoneNumberFixer(phone_raw)
             if result.get('valid'):
                 phone = result.get("number")
                 print(f"Using valid phone number '{phone}' from API.")
             else:
-                phone = phone_raw
+                phone = phone_raw 
                 print(f"Phone fixer could not verify '{phone_raw}'. Trying raw.")
 
         except Exception as e:
@@ -231,10 +233,11 @@ def transaction_webhook():
         return "Incomplete customer data", 500
 
     print(f"Processing purchase for {first} {last}: ({item_sold})")
-
+    
+    
     if "monthly" in item_sold and "autopay" in item_sold:
-
-        autopay_doc = db.getData('active_autopays', customer_id)
+        
+        autopay_doc = dataBase.getData('active_autopays', customer_id)
 
         if autopay_doc.exists:
             print(f"Existing 12-month autopay found for {first} {last}. Extending code.")
@@ -243,17 +246,20 @@ def transaction_webhook():
             current_expiry = autopay_data.get('expireAt')
 
             rl_time, firestore_time = get_next_month_anniversary(current_expiry)
-
-            extension_success = extend_remotelock_code(guest_id, rl_time)
+            
+            # 1. Give RemoteLock the "Fake UTC" time
+            extension_success = extendRemoteLockCode(guest_id, rl_time)
 
             if extension_success:
-                db.update('active_autopays', customer_id, {'expireAt': firestore_time})
+                # 2. Give Firestore the true EST time
+                dataBase.update('active_autopays', customer_id, {'expireAt': firestore_time})
 
-                db.add('pin_change_tickets', phone, {'remote_lock_id': guest_id, 'timestamp': firestore.SERVER_TIMESTAMP})
+                dataBase.add('pin_change_tickets', phone, {'remote_lock_id': guest_id, 'timestamp': firestore.SERVER_TIMESTAMP})
                 print(f"Created PIN change ticket for {first} {last} with number: {phone}")
-
+                
+                # Format string using the localized firestore_time
                 exp_date_str = firestore_time.strftime('%Y-%m-%d')
-
+                
                 sms_body = f"{first}, your B-Strong monthly payment was received and your door code has been extended and will now expire {exp_date_str} at 10:00 pm. If you'd like to change your PIN, reply to this message with a 4 or 5 digit number within the next 48 hours."
                 send_sms(to_phone_number=phone, body=sms_body)
                 return "Autopay code extended", 200
@@ -263,39 +269,41 @@ def transaction_webhook():
 
         else:
             print(f"First month of 12-month autopay for {first} {last}. Creating new code.")
-
+            
             rl_time, firestore_time = get_next_month_anniversary()
 
-            success, guest_id = create_door_code(first, last, phone, item_sold, force_end_utc=rl_time)
+            # Pass the fake UTC time to RemoteLock
+            success, guest_id = createDoorCode(first, last, phone, item_sold, force_end_utc=rl_time)
 
             if success:
-                db.add('active_autopays', customer_id, {
+                # Save the True EST time to Firestore
+                dataBase.add('active_autopays', customer_id, {
                     'remote_lock_id': guest_id,
                     'expireAt': firestore_time,
                     'phone': phone,
                     'first_name': first,
                     'last_name': last
                 })
-                db.add('pin_change_tickets', phone, {'remote_lock_id': guest_id, 'timestamp': firestore.SERVER_TIMESTAMP})
+                dataBase.add('pin_change_tickets', phone, {'remote_lock_id': guest_id, 'timestamp': firestore.SERVER_TIMESTAMP})
                 print(f"Created PIN change ticket for {first} {last} with number: {phone}")
                 return "First month autopay code created", 200
             else:
                 send_sms(to_phone_number=Owner1, body=f"{first} {last} didn't get a door code for their new autopay.", to_phone_number_2=Owner2)
                 return "Failed to create first month code", 500
-
-    success, guest_id = create_door_code(first, last, phone, item_sold)
-
+    
+    success, guest_id = createDoorCode(first, last, phone, item_sold)
+    
     if success:
         is_day_pass = "day pass" in item_sold
         if not is_day_pass:
             try:
-                db.add('pin_change_tickets', phone, {'remote_lock_id': guest_id, 'timestamp': firestore.SERVER_TIMESTAMP})
+                dataBase.add('pin_change_tickets', phone, {'remote_lock_id': guest_id, 'timestamp': firestore.SERVER_TIMESTAMP})
                 print(f"Created PIN change ticket for {first} {last} with number: {phone}")
             except Exception as e:
                 print(f"Failed to create PIN change ticket for {phone}: {e}")
                 send_Dev(f"Failed to create PIN ticket for {phone}: {e}")
         return "Door code created successfully", 200
-
+    
     else:
         send_sms(to_phone_number=Owner1, body=f"{first} {last} didn't get a door code.", to_phone_number_2=Owner2)
         return "Failed to create door code", 500
@@ -303,25 +311,24 @@ def transaction_webhook():
 
 # --- SMS Webhook Handler for PIN Changes ----------------------
 @app.route("/webhook-sms", methods=['POST'])
-def sms_pin_changes():
+def smsPinChanges():
     auth_token = Config.get("TWILIO_AUTH_TOKEN")
     validator = RequestValidator(auth_token)
-
-    path = request.full_path if request.query_string else request.path
-    url = f"https://{request.headers.get('X-Forwarded-Host', request.host)}{path}"
-
+    
+    url = f"https://{request.headers.get('X-Forwarded-Host', request.host)}{request.full_path}"
+    
     post_vars = request.form
     signature = request.headers.get('X-Twilio-Signature', '')
 
     if not validator.validate(url, post_vars, signature):
         print(f"Twilio signature validation FAILED. URL used for validation: {url}")
         return "Forbidden: Invalid Twilio signature", 403
-
+    
     print("Twilio signature validation PASSED.")
     from_number = request.form.get('From')
     body = request.form.get('Body', '').strip()
 
-    ticket = db.getData('pin_change_tickets', from_number)
+    ticket = dataBase.getData('pin_change_tickets', from_number)
 
     if not ticket.exists:
         print(f"No PIN change ticket found for {from_number}. Ignoring.")
@@ -333,7 +340,7 @@ def sms_pin_changes():
 
     if datetime.now(pytz.utc) > (timestamp + timedelta(hours=48)):
         send_sms(to_phone_number=from_number, body="Sorry, the 48-hour window for changing your PIN has expired.")
-        db.delete('pin_change_tickets', from_number)
+        dataBase.delete('pin_change_tickets', from_number)
         return "Ticket expired.", 200
 
     cleaned_pin = body.replace('#', '').strip()
@@ -352,28 +359,28 @@ def sms_pin_changes():
         "Accept": "application/vnd.lockstate+json; version=1",
         "Content-Type": "application/json"
     }
-    pin_payload = {"attributes": {"pin": cleaned_pin}}
+    payload = {"attributes": {"pin": cleaned_pin}}
 
     try:
-        response = requests.put(update_url, json=pin_payload, headers=headers, timeout=10)
+        response = requests.put(update_url, json=payload, headers=headers, timeout=10)
         if response.status_code == 200:
             send_sms(to_phone_number=from_number, body=f"Door code successfully set to {cleaned_pin}#")
-            db.delete('pin_change_tickets', from_number)
+            dataBase.delete('pin_change_tickets', from_number)
             return "PIN updated.", 200
-
+        
         elif response.status_code == 422:
             send_sms(to_phone_number=from_number, body="Sorry, that code is already in use. Please try again.")
             return "PIN taken.", 200
-
+        
         else:
             response.raise_for_status()
-
+    
     except requests.exceptions.RequestException as e:
         print(f"Failed to update PIN for {from_number}: {e}")
         send_Dev(f"RemoteLock API error on PIN update for {from_number}: {e.response.text if e.response else e}")
         send_sms(to_phone_number=from_number, body="Sorry, an error occurred while updating your code. Please contact staff.")
         return "RemoteLock error.", 500
-
+    
     return "OK", 200
 
 
@@ -381,19 +388,19 @@ def sms_pin_changes():
 def cleanup_firestore():
     cleanup_token = Config.get("CLEANUP_TOKEN")
     received_token = request.headers.get("X-Cleanup-Token")
-
+    
     if received_token != cleanup_token:
         abort(403, "Invalid cleanup token")
 
     try:
-        all_tickets = db.getAllOldDocs()
+        all_tickets = dataBase.getAllOldDocs()
         deleted_count = 0
-        batch = db.getBatch()
-
+        batch = dataBase.getBatch()
+        
         for doc in all_tickets:
             batch.delete(doc.reference)
             deleted_count += 1
-
+        
         batch.commit()
 
         print(f"Firestore cleanup successful. Deleted {deleted_count} old documents.")
