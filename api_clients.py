@@ -1,6 +1,7 @@
 import requests, time
 from datetime import datetime, timedelta, timezone
-from config import Config, send_Dev
+from config import Config
+from utils import send_Dev
 
 remote_lock_token = None
 token_expiry = datetime.min.replace(tzinfo=timezone.utc)
