@@ -1,8 +1,10 @@
 import os, requests, re, pytz
 from flask import Flask, request, abort
 from datetime import datetime, timedelta, timezone
-from config import Config, send_sms, send_Dev, phoneNumberFixer
-from services import DataBase, createDoorCode, extendRemoteLockCode, get_next_month_anniversary
+from config import Config
+from utils import send_sms, send_Dev, fix_phone_number
+from services import create_door_code, extend_remotelock_code, get_next_month_anniversary
+from database import Database
 from api_clients import get_vagaro_customer_details, get_remotelock_token
 from google.cloud import firestore
 from twilio.request_validator import RequestValidator
@@ -12,7 +14,7 @@ app = Flask(__name__)
 Owner1 = Config.get("OWNER_PHONE_NUMBER_1")
 Owner2 = Config.get("OWNER_PHONE_NUMBER_2")
 miscCustomerID = Config.get("MISC_PERSON_CUSTID")
-dataBase = DataBase()
+dataBase = Database()
 
 # --- Daily Cron Job for Expirations ----------------------
 @app.route("/cron-expire", methods=['POST'])
@@ -153,6 +155,10 @@ def transaction_webhook():
     if not unique_id:
         unique_id = payload.get("transactionId")
 
+    if not unique_id:
+        send_Dev(f"Transaction webhook missing both userPaymentId and transactionId for customer {customer_id}. Cannot deduplicate.")
+        return "Missing transaction ID", 400
+
     if dataBase.checkIfExists('processed_transactions', unique_id):
         print(f"Duplicate transaction detected: {unique_id}. Skipping.")
         return "Duplicate transaction", 200
@@ -177,7 +183,7 @@ def transaction_webhook():
             phone_raw_from_firestore = customer_data.get('phone_number')
             
             try:
-                phone_result = phoneNumberFixer(phone_raw_from_firestore)
+                phone_result = fix_phone_number(phone_raw_from_firestore)
                 
                 if phone_result.get('valid'):
                     phone_is_valid = True
@@ -214,7 +220,7 @@ def transaction_webhook():
                 print(f"No valid phone numbers from form or inside Vagaro")
                 raise ValueError("No mobile phone found in Vagaro profile.")
 
-            result = phoneNumberFixer(phone_raw)
+            result = fix_phone_number(phone_raw)
             if result.get('valid'):
                 phone = result.get("number")
                 print(f"Using valid phone number '{phone}' from API.")
@@ -248,7 +254,7 @@ def transaction_webhook():
             rl_time, firestore_time = get_next_month_anniversary(current_expiry)
             
             # 1. Give RemoteLock the "Fake UTC" time
-            extension_success = extendRemoteLockCode(guest_id, rl_time)
+            extension_success = extend_remotelock_code(guest_id, rl_time)
 
             if extension_success:
                 # 2. Give Firestore the true EST time
@@ -273,7 +279,7 @@ def transaction_webhook():
             rl_time, firestore_time = get_next_month_anniversary()
 
             # Pass the fake UTC time to RemoteLock
-            success, guest_id = createDoorCode(first, last, phone, item_sold, force_end_utc=rl_time)
+            success, guest_id = create_door_code(first, last, phone, item_sold, force_end_utc=rl_time)
 
             if success:
                 # Save the True EST time to Firestore
@@ -291,7 +297,7 @@ def transaction_webhook():
                 send_sms(to_phone_number=Owner1, body=f"{first} {last} didn't get a door code for their new autopay.", to_phone_number_2=Owner2)
                 return "Failed to create first month code", 500
     
-    success, guest_id = createDoorCode(first, last, phone, item_sold)
+    success, guest_id = create_door_code(first, last, phone, item_sold)
     
     if success:
         is_day_pass = "day pass" in item_sold

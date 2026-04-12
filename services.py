@@ -35,7 +35,11 @@ def create_door_code(first, last, phone, membership_type, force_end_utc=None):
         rl_time, _ = get_next_month_anniversary()
         end_utc = rl_time
     else:
-        duration = MEMBERSHIP_DURATIONS.get(membership_type.lower(), timedelta(days=0))
+        duration = MEMBERSHIP_DURATIONS.get(membership_type.lower())
+        if duration is None:
+            print(f"WARNING: Unknown membership type '{membership_type}'. Alerting dev and defaulting to 0-day access.")
+            send_Dev(f"Unknown membership type received: '{membership_type}' for {first} {last}. Defaulted to same-day access.")
+            duration = timedelta(days=0)
         end_moment_est = start_time_est + duration
         end_time_est = est.localize(datetime.combine(end_moment_est.date(), time(22, 0)))
         end_utc = end_time_est.replace(tzinfo=pytz.UTC)
