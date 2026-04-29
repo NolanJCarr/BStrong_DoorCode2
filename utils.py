@@ -45,7 +45,11 @@ def send_sms(
 
 
 def send_Dev(body: str) -> bool:
-    return send_sms(to_phone_number=Config.get("DEVELOPER_PHONE_NUMBER"), body=body)
+    dev_phone = Config.get("DEVELOPER_PHONE_NUMBER")
+    if not dev_phone:
+        logger.error("DEVELOPER_PHONE_NUMBER not configured — dev alert dropped.")
+        return False
+    return send_sms(to_phone_number=dev_phone, body=body)
 
 
 def fix_phone_number(raw_phone_number: str | None) -> PhoneResult:
