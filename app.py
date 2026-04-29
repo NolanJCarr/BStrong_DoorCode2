@@ -5,7 +5,7 @@ from config import Config
 from utils import send_sms, send_Dev, fix_phone_number
 from services import create_door_code, extend_remotelock_code, get_next_month_anniversary
 from database import Database
-from api_clients import get_vagaro_customer_details, get_remotelock_token
+from api_clients import RemoteLockClient, VagaroClient, PinConflictError
 from google.cloud import firestore
 from twilio.request_validator import RequestValidator
 
@@ -18,6 +18,8 @@ Owner1 = Config.get("OWNER_PHONE_NUMBER_1")
 Owner2 = Config.get("OWNER_PHONE_NUMBER_2")
 miscCustomerID = Config.get("MISC_PERSON_CUSTID")
 dataBase = Database()
+rl_client = RemoteLockClient()
+vagaro_client = VagaroClient()
 
 # --- Daily Cron Job for Expirations ----------------------
 @app.route("/cron-expire", methods=['POST'])
@@ -58,7 +60,6 @@ def form_webhook():
     received_token = request.headers.get("X-Vagaro-Signature")
     if received_token != expected_token:
         abort(403, "Invalid X-Vagaro-Signature")
-
 
     data = request.get_json(silent=True)
     if not data or "payload" not in data:
@@ -203,7 +204,7 @@ def transaction_webhook():
     if not phone_is_valid:
         try:
             logger.info(f"Executing API fallback for customer {customer_id} (name so far: {first} {last})")
-            cust = get_vagaro_customer_details(customer_id)
+            cust = vagaro_client.get_customer_details(customer_id)
             if not cust:
                 raise ValueError("Customer data could not be retrieved from API.")
 
@@ -239,7 +240,6 @@ def transaction_webhook():
 
     logger.info(f"Processing '{item_sold}' for {first} {last} ({phone}), transaction {unique_id}")
 
-
     if "monthly" in item_sold and "autopay" in item_sold:
 
         autopay_doc = dataBase.getData('active_autopays', customer_id)
@@ -252,7 +252,7 @@ def transaction_webhook():
 
             rl_time, firestore_time = get_next_month_anniversary(current_expiry)
 
-            extension_success = extend_remotelock_code(guest_id, rl_time)
+            extension_success = extend_remotelock_code(guest_id, rl_time, rl_client)
 
             if extension_success:
                 dataBase.update('active_autopays', customer_id, {'expireAt': firestore_time})
@@ -274,7 +274,7 @@ def transaction_webhook():
 
             rl_time, firestore_time = get_next_month_anniversary()
 
-            success, guest_id = create_door_code(first, last, phone, item_sold, force_end_utc=rl_time)
+            success, guest_id = create_door_code(first, last, phone, item_sold, rl_client, force_end_utc=rl_time)
 
             if success:
                 dataBase.add('active_autopays', customer_id, {
@@ -291,7 +291,7 @@ def transaction_webhook():
                 send_sms(to_phone_number=Owner1, body=f"{first} {last} didn't get a door code for their new autopay.", to_phone_number_2=Owner2)
                 return "Failed to create first month code", 500
 
-    success, guest_id = create_door_code(first, last, phone, item_sold)
+    success, guest_id = create_door_code(first, last, phone, item_sold, rl_client)
 
     if success:
         is_day_pass = "day pass" in item_sold
@@ -350,43 +350,23 @@ def smsPinChanges():
         logger.info(f"Invalid PIN format '{cleaned_pin}' from {from_number}.")
         return "Invalid PIN format.", 200
 
-    access_token = get_remotelock_token()
-    if not access_token:
-        logger.error(f"Could not get RemoteLock token for PIN change for {from_number}")
-        send_Dev(f"Could not get RemoteLock token for PIN change for {from_number}")
-        return "Internal error.", 500
-
-    update_url = f"https://api.remotelock.com/access_persons/{remote_lock_id}"
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Accept": "application/vnd.lockstate+json; version=1",
-        "Content-Type": "application/json"
-    }
-    payload = {"attributes": {"pin": cleaned_pin}}
-
     try:
-        response = requests.put(update_url, json=payload, headers=headers, timeout=10)
-        if response.status_code == 200:
-            send_sms(to_phone_number=from_number, body=f"Door code successfully set to {cleaned_pin}#")
-            logger.info(f"PIN changed to {cleaned_pin} for {from_number}, RemoteLock guest {remote_lock_id}")
-            dataBase.delete('pin_change_tickets', from_number)
-            return "PIN updated.", 200
+        rl_client.update_pin(remote_lock_id, cleaned_pin)
+        send_sms(to_phone_number=from_number, body=f"Door code successfully set to {cleaned_pin}#")
+        logger.info(f"PIN changed to {cleaned_pin} for {from_number}, RemoteLock guest {remote_lock_id}")
+        dataBase.delete('pin_change_tickets', from_number)
+        return "PIN updated.", 200
 
-        elif response.status_code == 422:
-            send_sms(to_phone_number=from_number, body="Sorry, that code is already in use. Please try again.")
-            logger.warning(f"PIN {cleaned_pin} already in use (422) for {from_number}.")
-            return "PIN taken.", 200
+    except PinConflictError:
+        send_sms(to_phone_number=from_number, body="Sorry, that code is already in use. Please try again.")
+        logger.warning(f"PIN {cleaned_pin} already in use (422) for {from_number}.")
+        return "PIN taken.", 200
 
-        else:
-            response.raise_for_status()
-
-    except requests.exceptions.RequestException as e:
+    except (RuntimeError, requests.exceptions.RequestException) as e:
         logger.error(f"RemoteLock API error on PIN update for {from_number}: {e}")
-        send_Dev(f"RemoteLock API error on PIN update for {from_number}: {e.response.text if e.response else e}")
+        send_Dev(f"RemoteLock API error on PIN update for {from_number}: {e}")
         send_sms(to_phone_number=from_number, body="Sorry, an error occurred while updating your code. Please contact staff.")
         return "RemoteLock error.", 500
-
-    return "OK", 200
 
 
 @app.route("/cleanup-firestore", methods=['POST'])

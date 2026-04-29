@@ -1,7 +1,9 @@
-import pytz
+import pytz, logging
 from datetime import datetime, timedelta
 from google.cloud import firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
+
+logger = logging.getLogger(__name__)
 
 
 class Database:
@@ -11,7 +13,7 @@ class Database:
     def checkIfExists(self, collection, key):
         reference = self.database.collection(collection).document(key)
         if reference.get().exists:
-            print(f"Duplicate transaction item ignored: {key}")
+            logger.info(f"Duplicate transaction item ignored: {key}")
             return True
         else:
             return False

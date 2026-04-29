@@ -5,101 +5,165 @@ from utils import send_Dev
 
 logger = logging.getLogger(__name__)
 
-remote_lock_token = None
-token_expiry = datetime.min.replace(tzinfo=timezone.utc)
-_vagaro_cached_token = None
-_vagaro_expires_at = 0
-
+REMOTELOCK_BASE_URL = "https://api.remotelock.com"
 REMOTELOCK_TOKEN_URL = "https://connect.remotelock.com/oauth/token"
-BUSINESS_ID = "e9S4DjyPbv-ccrPDDqzBEA=="
-WORKER_URL = "https://bstrong-vagaro-proxy.nolantatum6.workers.dev"
+VAGARO_WORKER_URL = "https://bstrong-vagaro-proxy.nolantatum6.workers.dev"
+VAGARO_BUSINESS_ID = "e9S4DjyPbv-ccrPDDqzBEA=="
+LOCK_SCHEDULE_ID = "d18e46f1-22b4-4880-9b0b-3d1ea60441fc"
 
 
-def get_vagaro_customer_details(cust_id):
-    token = get_vagaro_token()
-    if not token:
-        logger.error("Could not get Vagaro customer details: missing token or wrong BusinessID.")
-        send_Dev("Could not get customer details from Vagaro from either Missing token or Wrong BuisnessID")
-        return None
-
-    headers = {
-        "accessToken": token.strip(),
-        "X-Target-Url": "https://api.vagaro.com/us03/api/v2/customers",
-        "Content-Type": "application/json"
-    }
-
-    payload = {"businessId": BUSINESS_ID, "customerId": cust_id}
-
-    try:
-        vagaro_resp = requests.post(WORKER_URL, json=payload, headers=headers, timeout=10)
-        vagaro_resp.raise_for_status()
-        return vagaro_resp.json().get("data")
-    except requests.exceptions.RequestException as e:
-        error_text = e.response.text if hasattr(e, 'response') and e.response else str(e)
-        logger.error(f"Vagaro API error fetching customer {cust_id}: {error_text}")
-        send_Dev(f"STOP GUESSING. VAGARO SAID: {error_text}")
-        return None
+class PinConflictError(Exception):
+    """Raised when a RemoteLock PIN is already in use (HTTP 422)."""
+    pass
 
 
-def get_remotelock_token():
-    global remote_lock_token, token_expiry
-    now = datetime.now(timezone.utc)
-    if remote_lock_token and token_expiry and now + timedelta(seconds=30) < token_expiry:
-        return remote_lock_token
+class RemoteLockClient:
+    def __init__(self):
+        self._token = None
+        self._token_expiry = datetime.min.replace(tzinfo=timezone.utc)
 
-    client_id = Config.get("REMOTELOCK_CLIENT_ID")
-    client_secret = Config.get("REMOTELOCK_CLIENT_SECRET")
+    def _get_token(self):
+        now = datetime.now(timezone.utc)
+        if self._token and now + timedelta(seconds=30) < self._token_expiry:
+            return self._token
 
-    if not all([client_id, client_secret, REMOTELOCK_TOKEN_URL]):
-        logger.error("Missing RemoteLock credentials (client_id or client_secret).")
-        return None
+        client_id = Config.get("REMOTELOCK_CLIENT_ID")
+        client_secret = Config.get("REMOTELOCK_CLIENT_SECRET")
 
-    payload = {
-        "grant_type": "client_credentials",
-        "client_id": client_id,
-        "client_secret": client_secret
-    }
-    try:
-        resp = requests.post(REMOTELOCK_TOKEN_URL, json=payload, timeout=10)
+        if not all([client_id, client_secret]):
+            logger.error("Missing RemoteLock credentials (client_id or client_secret).")
+            return None
+
+        try:
+            resp = requests.post(REMOTELOCK_TOKEN_URL, json={
+                "grant_type": "client_credentials",
+                "client_id": client_id,
+                "client_secret": client_secret
+            }, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+            self._token = data["access_token"]
+            self._token_expiry = now + timedelta(seconds=data.get("expires_in", 3600) - 60)
+            logger.info(f"RemoteLock token refreshed. Expires at {self._token_expiry.isoformat()}")
+            return self._token
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error getting RemoteLock token: {e}")
+            send_Dev(f"Could not refresh RemoteLock token: {e}")
+            return None
+
+    def _headers(self):
+        token = self._get_token()
+        if not token:
+            raise RuntimeError("Could not obtain RemoteLock access token.")
+        return {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.lockstate+json; version=1",
+            "Content-Type": "application/json"
+        }
+
+    def create_access_person(self, name, starts_at, ends_at):
+        """Create a new access guest. Returns (guest_id, pin). Raises on failure."""
+        resp = requests.post(f"{REMOTELOCK_BASE_URL}/access_persons", json={
+            "type": "access_guest",
+            "attributes": {
+                "name": name,
+                "generate_pin": True,
+                "starts_at": starts_at,
+                "ends_at": ends_at
+            }
+        }, headers=self._headers(), timeout=10)
         resp.raise_for_status()
-        data = resp.json()
-        remote_lock_token = data["access_token"]
-        token_expiry = now + timedelta(seconds=data.get("expires_in", 3600) - 60)
-        logger.info(f"RemoteLock token refreshed. Expires at {token_expiry.isoformat()}")
-        return remote_lock_token
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error getting RemoteLock token: {e}")
-        send_Dev(f"Could not refresh RemoteLock token: {e}")
-        return None
+        guest = resp.json()["data"]
+        return guest["id"], guest["attributes"]["pin"]
+
+    def grant_lock_access(self, guest_id, lock_id):
+        """Grant a guest access to the configured lock. Raises on failure."""
+        resp = requests.post(
+            f"{REMOTELOCK_BASE_URL}/access_persons/{guest_id}/accesses",
+            json={"attributes": {
+                "accessible_id": lock_id,
+                "accessible_type": "lock",
+                "access_schedule_id": LOCK_SCHEDULE_ID
+            }},
+            headers=self._headers(),
+            timeout=10
+        )
+        resp.raise_for_status()
+
+    def update_pin(self, guest_id, pin):
+        """Update a guest's PIN. Raises PinConflictError on 422, RequestException on other failures."""
+        resp = requests.put(
+            f"{REMOTELOCK_BASE_URL}/access_persons/{guest_id}",
+            json={"attributes": {"pin": pin}},
+            headers=self._headers(),
+            timeout=10
+        )
+        if resp.status_code == 422:
+            raise PinConflictError(f"PIN {pin} is already in use.")
+        resp.raise_for_status()
+
+    def extend_access(self, guest_id, ends_at):
+        """Extend a guest's access end time. Raises on failure."""
+        resp = requests.put(
+            f"{REMOTELOCK_BASE_URL}/access_persons/{guest_id}",
+            json={"attributes": {"ends_at": ends_at}},
+            headers=self._headers(),
+            timeout=10
+        )
+        resp.raise_for_status()
 
 
-def get_vagaro_token():
-    global _vagaro_cached_token, _vagaro_expires_at
-    now = time.time()
-    if _vagaro_cached_token and now < _vagaro_expires_at - 60:
-        return _vagaro_cached_token
+class VagaroClient:
+    def __init__(self):
+        self._token = None
+        self._token_expiry = 0
 
-    headers = {
-        "X-Target-Url": "https://api.vagaro.com/us03/api/v2/merchants/generate-access-token",
-        "Content-Type": "application/json"
-    }
+    def _get_token(self):
+        now = time.time()
+        if self._token and now < self._token_expiry - 60:
+            return self._token
 
-    try:
-        r = requests.post(WORKER_URL, json={}, headers=headers, timeout=10)
-        r.raise_for_status()
+        try:
+            r = requests.post(VAGARO_WORKER_URL, json={}, headers={
+                "X-Target-Url": "https://api.vagaro.com/us03/api/v2/merchants/generate-access-token",
+                "Content-Type": "application/json"
+            }, timeout=10)
+            r.raise_for_status()
 
-        resp_json = r.json()
-        data = resp_json.get("data", {})
+            data = r.json().get("data", {})
+            self._token = data.get("access_token")
+            expires_in = data.get("expires_in", 3600)
+            self._token_expiry = now + expires_in
+            logger.info(f"Vagaro token refreshed. Expires in {expires_in}s.")
+            return self._token
 
-        _vagaro_cached_token = data.get("access_token")
-        expires_in = data.get("expires_in", 3600)
-        _vagaro_expires_at = now + expires_in
+        except requests.exceptions.RequestException as e:
+            error_text = e.response.text if hasattr(e, 'response') and e.response else str(e)
+            logger.error(f"Error getting Vagaro token via Worker: {error_text}")
+            send_Dev(f"Could not refresh Vagaro token: {error_text}")
+            return None
 
-        logger.info(f"Vagaro token refreshed. Expires in {expires_in}s.")
-        return _vagaro_cached_token
+    def get_customer_details(self, cust_id):
+        """Fetch customer details from Vagaro. Returns customer dict or None."""
+        token = self._get_token()
+        if not token:
+            logger.error("Could not get Vagaro customer details: missing token or wrong BusinessID.")
+            send_Dev("Could not get customer details from Vagaro from either Missing token or Wrong BuisnessID")
+            return None
 
-    except requests.exceptions.RequestException as e:
-        error_text = e.response.text if hasattr(e, 'response') and e.response else str(e)
-        logger.error(f"Error getting Vagaro token via Worker: {error_text}")
-        send_Dev(f"Could not refresh Vagaro token: {error_text}")
-        return None
+        try:
+            resp = requests.post(VAGARO_WORKER_URL, json={
+                "businessId": VAGARO_BUSINESS_ID,
+                "customerId": cust_id
+            }, headers={
+                "accessToken": token.strip(),
+                "X-Target-Url": "https://api.vagaro.com/us03/api/v2/customers",
+                "Content-Type": "application/json"
+            }, timeout=10)
+            resp.raise_for_status()
+            return resp.json().get("data")
+        except requests.exceptions.RequestException as e:
+            error_text = e.response.text if hasattr(e, 'response') and e.response else str(e)
+            logger.error(f"Vagaro API error fetching customer {cust_id}: {error_text}")
+            send_Dev(f"STOP GUESSING. VAGARO SAID: {error_text}")
+            return None

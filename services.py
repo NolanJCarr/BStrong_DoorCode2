@@ -1,5 +1,4 @@
 import pytz, requests, calendar, logging
-from api_clients import get_remotelock_token
 from config import MEMBERSHIP_DURATIONS, Config
 from utils import send_Dev, send_sms
 from datetime import datetime, timedelta, time
@@ -7,11 +6,7 @@ from datetime import datetime, timedelta, time
 logger = logging.getLogger(__name__)
 
 
-def create_door_code(first, last, phone, membership_type, force_end_utc=None):
-    access_token = get_remotelock_token()
-    if not access_token:
-        return (False, None)
-
+def create_door_code(first, last, phone, membership_type, rl_client, force_end_utc=None):
     lock_id = Config.get("LOCK_ID")
     if not lock_id:
         logger.error("Missing LOCK_ID in config.")
@@ -48,44 +43,20 @@ def create_door_code(first, last, phone, membership_type, force_end_utc=None):
 
     logger.info(f"RemoteLock time window for {first} {last}: start={start_utc.isoformat()} end={end_utc.isoformat()} (membership='{membership_type}')")
 
-    payload = {
-        "type": "access_guest",
-        "attributes": {
-            "name": f"{first} {last}",
-            "generate_pin": True,
-            "starts_at": start_utc.isoformat(),
-            "ends_at": end_utc.isoformat().replace("+00:00", "Z")
-        }
-    }
-    hdr = {
-        "Authorization": f"Bearer {access_token}",
-        "Accept": "application/vnd.lockstate+json; version=1",
-        "Content-Type": "application/json"
-    }
-
-    guest_id = None
     try:
-        cr = requests.post("https://api.remotelock.com/access_persons", json=payload, headers=hdr, timeout=10)
-        cr.raise_for_status()
-        guest = cr.json()["data"]
-        pin = guest["attributes"]["pin"]
-        guest_id = guest["id"]
+        guest_id, pin = rl_client.create_access_person(
+            name=f"{first} {last}",
+            starts_at=start_utc.isoformat(),
+            ends_at=end_utc.isoformat().replace("+00:00", "Z")
+        )
         logger.info(f"RemoteLock access_person created for {first} {last}: guest_id={guest_id}, pin={pin}")
 
-        grant = {
-            "attributes": {
-                "accessible_id": lock_id,
-                "accessible_type": "lock",
-                "access_schedule_id": "d18e46f1-22b4-4880-9b0b-3d1ea60441fc"
-            }
-        }
-        gr = requests.post(f"https://api.remotelock.com/access_persons/{guest_id}/accesses", json=grant, headers=hdr, timeout=10)
-        gr.raise_for_status()
+        rl_client.grant_lock_access(guest_id, lock_id)
         logger.info(f"RemoteLock lock access granted for guest {guest_id}")
 
-    except requests.exceptions.RequestException as e:
+    except (RuntimeError, requests.exceptions.RequestException) as e:
         logger.error(f"RemoteLock API error creating code for {first} {last}: {e}")
-        send_Dev(f"RemoteLock API error for {first} {last}: {e.response.text if e.response else e}")
+        send_Dev(f"RemoteLock API error for {first} {last}: {e}")
         return (False, None)
 
     exp_date = end_utc.astimezone(est).strftime('%Y-%m-%d')
@@ -99,32 +70,16 @@ def create_door_code(first, last, phone, membership_type, force_end_utc=None):
     return (sms_sent, guest_id)
 
 
-def extend_remotelock_code(guest_id, new_expiration_datetime):
-    access_token = get_remotelock_token()
-    if not access_token:
-        return False
-
-    payload = {
-        "attributes": {
-            "ends_at": new_expiration_datetime.isoformat().replace("+00:00", "Z")
-        }
-    }
-    hdr = {
-        "Authorization": f"Bearer {access_token}",
-        "Accept": "application/vnd.lockstate+json; version=1",
-        "Content-Type": "application/json"
-    }
-
+def extend_remotelock_code(guest_id, new_expiration_datetime, rl_client):
     try:
-        url = f"https://api.remotelock.com/access_persons/{guest_id}"
-        response = requests.put(url, json=payload, headers=hdr, timeout=10)
-        response.raise_for_status()
+        ends_at = new_expiration_datetime.isoformat().replace("+00:00", "Z")
+        rl_client.extend_access(guest_id, ends_at)
         logger.info(f"RemoteLock code extended for guest {guest_id} to {new_expiration_datetime.isoformat()}")
         return True
 
-    except requests.exceptions.RequestException as e:
+    except (RuntimeError, requests.exceptions.RequestException) as e:
         logger.error(f"RemoteLock API error extending guest {guest_id}: {e}")
-        send_Dev(f"RemoteLock API error extending {guest_id}: {e.response.text if e.response else e}")
+        send_Dev(f"RemoteLock API error extending {guest_id}: {e}")
         return False
 
 
