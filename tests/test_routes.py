@@ -388,6 +388,27 @@ class TestCronExpire:
         mock_db.delete.assert_called_once_with('active_autopays', 'autopay-doc-1')
 
 
+# ---- /health -------------------------------------------------------------
+
+class TestHealthEndpoint:
+    def test_returns_200(self, app_client):
+        client, *_ = app_client
+        resp = client.get('/health')
+        assert resp.status_code == 200
+
+    def test_returns_ok_status(self, app_client):
+        client, *_ = app_client
+        resp = client.get('/health')
+        data = resp.get_json()
+        assert data['status'] == 'ok'
+        assert data['service'] == 'bstrong-door-code'
+
+    def test_no_auth_required(self, app_client):
+        client, *_ = app_client
+        resp = client.get('/health')
+        assert resp.status_code != 403
+
+
 # ---- /cleanup-firestore --------------------------------------------------
 
 class TestCleanupFirestore:

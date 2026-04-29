@@ -1,4 +1,5 @@
 import requests, time, logging
+from typing import Any
 from datetime import datetime, timedelta, timezone
 from config import Config
 from utils import send_Dev
@@ -22,7 +23,7 @@ class RemoteLockClient:
         self._token = None
         self._token_expiry = datetime.min.replace(tzinfo=timezone.utc)
 
-    def _get_token(self):
+    def _get_token(self) -> str | None:
         now = datetime.now(timezone.utc)
         if self._token and now + timedelta(seconds=30) < self._token_expiry:
             return self._token
@@ -51,7 +52,7 @@ class RemoteLockClient:
             send_Dev(f"Could not refresh RemoteLock token: {e}")
             return None
 
-    def _headers(self):
+    def _headers(self) -> dict[str, str]:
         token = self._get_token()
         if not token:
             raise RuntimeError("Could not obtain RemoteLock access token.")
@@ -61,7 +62,7 @@ class RemoteLockClient:
             "Content-Type": "application/json"
         }
 
-    def create_access_person(self, name, starts_at, ends_at):
+    def create_access_person(self, name: str, starts_at: str, ends_at: str) -> tuple[str, str]:
         """Create a new access guest. Returns (guest_id, pin). Raises on failure."""
         resp = requests.post(f"{REMOTELOCK_BASE_URL}/access_persons", json={
             "type": "access_guest",
@@ -76,7 +77,7 @@ class RemoteLockClient:
         guest = resp.json()["data"]
         return guest["id"], guest["attributes"]["pin"]
 
-    def grant_lock_access(self, guest_id, lock_id):
+    def grant_lock_access(self, guest_id: str, lock_id: str) -> None:
         """Grant a guest access to the configured lock. Raises on failure."""
         resp = requests.post(
             f"{REMOTELOCK_BASE_URL}/access_persons/{guest_id}/accesses",
@@ -90,7 +91,7 @@ class RemoteLockClient:
         )
         resp.raise_for_status()
 
-    def update_pin(self, guest_id, pin):
+    def update_pin(self, guest_id: str, pin: str) -> None:
         """Update a guest's PIN. Raises PinConflictError on 422, RequestException on other failures."""
         resp = requests.put(
             f"{REMOTELOCK_BASE_URL}/access_persons/{guest_id}",
@@ -102,7 +103,7 @@ class RemoteLockClient:
             raise PinConflictError(f"PIN {pin} is already in use.")
         resp.raise_for_status()
 
-    def extend_access(self, guest_id, ends_at):
+    def extend_access(self, guest_id: str, ends_at: str) -> None:
         """Extend a guest's access end time. Raises on failure."""
         resp = requests.put(
             f"{REMOTELOCK_BASE_URL}/access_persons/{guest_id}",
@@ -118,7 +119,7 @@ class VagaroClient:
         self._token = None
         self._token_expiry = 0
 
-    def _get_token(self):
+    def _get_token(self) -> str | None:
         now = time.time()
         if self._token and now < self._token_expiry - 60:
             return self._token
@@ -143,7 +144,7 @@ class VagaroClient:
             send_Dev(f"Could not refresh Vagaro token: {error_text}")
             return None
 
-    def get_customer_details(self, cust_id):
+    def get_customer_details(self, cust_id: str) -> dict[str, Any] | None:
         """Fetch customer details from Vagaro. Returns customer dict or None."""
         token = self._get_token()
         if not token:

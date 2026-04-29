@@ -1,12 +1,20 @@
 import pytz, requests, calendar, logging
 from config import MEMBERSHIP_DURATIONS, Config
 from utils import send_Dev, send_sms
+from api_clients import RemoteLockClient
 from datetime import datetime, timedelta, time
 
 logger = logging.getLogger(__name__)
 
 
-def create_door_code(first, last, phone, membership_type, rl_client, force_end_utc=None):
+def create_door_code(
+    first: str,
+    last: str,
+    phone: str,
+    membership_type: str,
+    rl_client: RemoteLockClient,
+    force_end_utc: datetime | None = None,
+) -> tuple[bool, str | None]:
     lock_id = Config.get("LOCK_ID")
     if not lock_id:
         logger.error("Missing LOCK_ID in config.")
@@ -70,7 +78,11 @@ def create_door_code(first, last, phone, membership_type, rl_client, force_end_u
     return (sms_sent, guest_id)
 
 
-def extend_remotelock_code(guest_id, new_expiration_datetime, rl_client):
+def extend_remotelock_code(
+    guest_id: str,
+    new_expiration_datetime: datetime,
+    rl_client: RemoteLockClient,
+) -> bool:
     try:
         ends_at = new_expiration_datetime.isoformat().replace("+00:00", "Z")
         rl_client.extend_access(guest_id, ends_at)
@@ -83,7 +95,7 @@ def extend_remotelock_code(guest_id, new_expiration_datetime, rl_client):
         return False
 
 
-def get_next_month_anniversary(existing_expiry=None):
+def get_next_month_anniversary(existing_expiry: datetime | None = None) -> tuple[datetime, datetime]:
     est = pytz.timezone("US/Eastern")
 
     if existing_expiry:

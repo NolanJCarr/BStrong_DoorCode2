@@ -369,6 +369,11 @@ def smsPinChanges():
         return "RemoteLock error.", 500
 
 
+@app.route("/health", methods=['GET'])
+def health() -> tuple[dict, int]:
+    return {"status": "ok", "service": "bstrong-door-code"}, 200
+
+
 @app.route("/cleanup-firestore", methods=['POST'])
 def cleanup_firestore():
     cleanup_token = Config.get("CLEANUP_TOKEN")

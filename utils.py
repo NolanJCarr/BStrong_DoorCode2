@@ -1,11 +1,23 @@
 import phonenumbers, logging
+from typing import TypedDict
 from twilio.rest import Client
 from config import Config
 
 logger = logging.getLogger(__name__)
 
 
-def send_sms(to_phone_number, body, to_phone_number_2=None, first_name=None, last_name=None):
+class PhoneResult(TypedDict):
+    valid: bool
+    number: str | None
+
+
+def send_sms(
+    to_phone_number: str,
+    body: str,
+    to_phone_number_2: str | None = None,
+    first_name: str | None = None,
+    last_name: str | None = None,
+) -> bool:
     sid = Config.get("TWILIO_ACCOUNT_SID")
     token = Config.get("TWILIO_AUTH_TOKEN")
     from_num = Config.get("TWILIO_PHONE_NUMBER")
@@ -32,11 +44,11 @@ def send_sms(to_phone_number, body, to_phone_number_2=None, first_name=None, las
         return False
 
 
-def send_Dev(body):
+def send_Dev(body: str) -> bool:
     return send_sms(to_phone_number=Config.get("DEVELOPER_PHONE_NUMBER"), body=body)
 
 
-def fix_phone_number(raw_phone_number):
+def fix_phone_number(raw_phone_number: str | None) -> PhoneResult:
     if not raw_phone_number:
         return {'valid': False, 'number': None}
 

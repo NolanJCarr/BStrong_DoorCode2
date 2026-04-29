@@ -1,4 +1,5 @@
 import os, logging
+from typing import Any
 from google.cloud import secretmanager
 from datetime import timedelta
 
@@ -21,7 +22,7 @@ class Config:
     _secrets = {}
 
     @classmethod
-    def get(cls, key):
+    def get(cls, key: str) -> str | None:
         if key in cls._secrets:
             return cls._secrets[key]
         try:
@@ -33,7 +34,7 @@ class Config:
             return None
 
 
-def get_secret(secret_id, version_id="latest"):
+def get_secret(secret_id: str, version_id: str = "latest") -> str:
     """Fetches a secret from Google Secret Manager."""
     if not GCP_PROJECT_ID:
         raise ValueError("GCP_PROJECT_ID environment variable not set.")
