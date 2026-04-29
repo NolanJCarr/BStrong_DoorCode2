@@ -1,8 +1,10 @@
-import pytz, requests, calendar
+import pytz, requests, calendar, logging
 from api_clients import get_remotelock_token
 from config import MEMBERSHIP_DURATIONS, Config
 from utils import send_Dev, send_sms
 from datetime import datetime, timedelta, time
+
+logger = logging.getLogger(__name__)
 
 
 def create_door_code(first, last, phone, membership_type, force_end_utc=None):
@@ -12,7 +14,7 @@ def create_door_code(first, last, phone, membership_type, force_end_utc=None):
 
     lock_id = Config.get("LOCK_ID")
     if not lock_id:
-        print("Missing LOCK_ID")
+        logger.error("Missing LOCK_ID in config.")
         return (False, None)
 
     est = pytz.timezone("US/Eastern")
@@ -37,12 +39,14 @@ def create_door_code(first, last, phone, membership_type, force_end_utc=None):
     else:
         duration = MEMBERSHIP_DURATIONS.get(membership_type.lower())
         if duration is None:
-            print(f"WARNING: Unknown membership type '{membership_type}'. Alerting dev and defaulting to 0-day access.")
+            logger.warning(f"Unknown membership type '{membership_type}' for {first} {last}. Defaulting to same-day access.")
             send_Dev(f"Unknown membership type received: '{membership_type}' for {first} {last}. Defaulted to same-day access.")
             duration = timedelta(days=0)
         end_moment_est = start_time_est + duration
         end_time_est = est.localize(datetime.combine(end_moment_est.date(), time(22, 0)))
         end_utc = end_time_est.replace(tzinfo=pytz.UTC)
+
+    logger.info(f"RemoteLock time window for {first} {last}: start={start_utc.isoformat()} end={end_utc.isoformat()} (membership='{membership_type}')")
 
     payload = {
         "type": "access_guest",
@@ -66,6 +70,7 @@ def create_door_code(first, last, phone, membership_type, force_end_utc=None):
         guest = cr.json()["data"]
         pin = guest["attributes"]["pin"]
         guest_id = guest["id"]
+        logger.info(f"RemoteLock access_person created for {first} {last}: guest_id={guest_id}, pin={pin}")
 
         grant = {
             "attributes": {
@@ -76,9 +81,10 @@ def create_door_code(first, last, phone, membership_type, force_end_utc=None):
         }
         gr = requests.post(f"https://api.remotelock.com/access_persons/{guest_id}/accesses", json=grant, headers=hdr, timeout=10)
         gr.raise_for_status()
+        logger.info(f"RemoteLock lock access granted for guest {guest_id}")
 
     except requests.exceptions.RequestException as e:
-        print(f"RemoteLock API error: {e}")
+        logger.error(f"RemoteLock API error creating code for {first} {last}: {e}")
         send_Dev(f"RemoteLock API error for {first} {last}: {e.response.text if e.response else e}")
         return (False, None)
 
@@ -113,11 +119,11 @@ def extend_remotelock_code(guest_id, new_expiration_datetime):
         url = f"https://api.remotelock.com/access_persons/{guest_id}"
         response = requests.put(url, json=payload, headers=hdr, timeout=10)
         response.raise_for_status()
-        print(f"Successfully extended RemoteLock code for guest {guest_id} to {new_expiration_datetime}")
+        logger.info(f"RemoteLock code extended for guest {guest_id} to {new_expiration_datetime.isoformat()}")
         return True
 
     except requests.exceptions.RequestException as e:
-        print(f"RemoteLock API error extending guest {guest_id}: {e}")
+        logger.error(f"RemoteLock API error extending guest {guest_id}: {e}")
         send_Dev(f"RemoteLock API error extending {guest_id}: {e.response.text if e.response else e}")
         return False
 

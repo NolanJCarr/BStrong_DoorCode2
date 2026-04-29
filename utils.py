@@ -1,6 +1,8 @@
-import phonenumbers
+import phonenumbers, logging
 from twilio.rest import Client
 from config import Config
+
+logger = logging.getLogger(__name__)
 
 
 def send_sms(to_phone_number, body, to_phone_number_2=None, first_name=None, last_name=None):
@@ -9,7 +11,7 @@ def send_sms(to_phone_number, body, to_phone_number_2=None, first_name=None, las
     from_num = Config.get("TWILIO_PHONE_NUMBER")
 
     if not all([sid, token, from_num]):
-        print("Twilio credentials are not configured. Cannot send SMS.")
+        logger.error("Twilio credentials are not configured. Cannot send SMS.")
         return False
 
     client = Client(sid, token)
@@ -22,11 +24,11 @@ def send_sms(to_phone_number, body, to_phone_number_2=None, first_name=None, las
             secondary_sender = from_num if to_phone_number_2.startswith("+1") else "B-STRONG"
             client.messages.create(body=body, from_=secondary_sender, to=to_phone_number_2)
 
-        print(f"SMS sent to {to_phone_number} via {primary_sender}")
+        logger.info(f"SMS sent to {to_phone_number} via {primary_sender}")
         return True
 
     except Exception as e:
-        print(f"Failed SMS to {first_name or ''} {last_name or ''}: {e}")
+        logger.error(f"Failed SMS to {first_name or ''} {last_name or ''} ({to_phone_number}): {e}")
         return False
 
 
@@ -55,5 +57,5 @@ def fix_phone_number(raw_phone_number):
             }
 
     except Exception as e:
-        print(f"Parsing error for {raw_phone_number}: {e}")
+        logger.warning(f"Phone parsing error for '{raw_phone_number}': {e}")
     return {'valid': False, 'number': raw_phone_number}

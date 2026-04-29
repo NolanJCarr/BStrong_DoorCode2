@@ -1,7 +1,9 @@
-import requests, time
+import requests, time, logging
 from datetime import datetime, timedelta, timezone
 from config import Config
 from utils import send_Dev
+
+logger = logging.getLogger(__name__)
 
 remote_lock_token = None
 token_expiry = datetime.min.replace(tzinfo=timezone.utc)
@@ -16,7 +18,7 @@ WORKER_URL = "https://bstrong-vagaro-proxy.nolantatum6.workers.dev"
 def get_vagaro_customer_details(cust_id):
     token = get_vagaro_token()
     if not token:
-        print("Could not get customer details from Vagaro from either Missing token or Wrong BuisnessID")
+        logger.error("Could not get Vagaro customer details: missing token or wrong BusinessID.")
         send_Dev("Could not get customer details from Vagaro from either Missing token or Wrong BuisnessID")
         return None
 
@@ -25,15 +27,16 @@ def get_vagaro_customer_details(cust_id):
         "X-Target-Url": "https://api.vagaro.com/us03/api/v2/customers",
         "Content-Type": "application/json"
     }
-    
+
     payload = {"businessId": BUSINESS_ID, "customerId": cust_id}
-    
+
     try:
         vagaro_resp = requests.post(WORKER_URL, json=payload, headers=headers, timeout=10)
         vagaro_resp.raise_for_status()
         return vagaro_resp.json().get("data")
     except requests.exceptions.RequestException as e:
         error_text = e.response.text if hasattr(e, 'response') and e.response else str(e)
+        logger.error(f"Vagaro API error fetching customer {cust_id}: {error_text}")
         send_Dev(f"STOP GUESSING. VAGARO SAID: {error_text}")
         return None
 
@@ -48,6 +51,7 @@ def get_remotelock_token():
     client_secret = Config.get("REMOTELOCK_CLIENT_SECRET")
 
     if not all([client_id, client_secret, REMOTELOCK_TOKEN_URL]):
+        logger.error("Missing RemoteLock credentials (client_id or client_secret).")
         return None
 
     payload = {
@@ -61,10 +65,11 @@ def get_remotelock_token():
         data = resp.json()
         remote_lock_token = data["access_token"]
         token_expiry = now + timedelta(seconds=data.get("expires_in", 3600) - 60)
+        logger.info(f"RemoteLock token refreshed. Expires at {token_expiry.isoformat()}")
         return remote_lock_token
     except requests.exceptions.RequestException as e:
-        print(f"Error getting RemoteLock token: {e}")
-        send_Dev( f"Could not refresh RemoteLock token: {e}")
+        logger.error(f"Error getting RemoteLock token: {e}")
+        send_Dev(f"Could not refresh RemoteLock token: {e}")
         return None
 
 
@@ -78,22 +83,23 @@ def get_vagaro_token():
         "X-Target-Url": "https://api.vagaro.com/us03/api/v2/merchants/generate-access-token",
         "Content-Type": "application/json"
     }
-    
+
     try:
         r = requests.post(WORKER_URL, json={}, headers=headers, timeout=10)
         r.raise_for_status()
-        
+
         resp_json = r.json()
         data = resp_json.get("data", {})
-        
+
         _vagaro_cached_token = data.get("access_token")
         expires_in = data.get("expires_in", 3600)
         _vagaro_expires_at = now + expires_in
-        
+
+        logger.info(f"Vagaro token refreshed. Expires in {expires_in}s.")
         return _vagaro_cached_token
-        
+
     except requests.exceptions.RequestException as e:
         error_text = e.response.text if hasattr(e, 'response') and e.response else str(e)
-        print(f"Error getting Vagaro token via Worker: {error_text}")
+        logger.error(f"Error getting Vagaro token via Worker: {error_text}")
         send_Dev(f"Could not refresh Vagaro token: {error_text}")
         return None

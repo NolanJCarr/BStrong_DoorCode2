@@ -1,6 +1,8 @@
-import os
+import os, logging
 from google.cloud import secretmanager
 from datetime import timedelta
+
+logger = logging.getLogger(__name__)
 
 GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID")
 
@@ -27,7 +29,7 @@ class Config:
             cls._secrets[key] = val
             return val
         except Exception as e:
-            print(f"Failed to fetch config key {key}: {e}")
+            logger.error(f"Failed to fetch config key '{key}': {e}")
             return None
 
 
@@ -42,5 +44,5 @@ def get_secret(secret_id, version_id="latest"):
         response = client.access_secret_version(request={"name": name})
         return response.payload.data.decode("UTF-8")
     except Exception as e:
-        print(f"Error accessing secret: {secret_id}. Details: {e}")
+        logger.error(f"Error accessing secret '{secret_id}': {e}")
         raise e
