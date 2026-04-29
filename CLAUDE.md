@@ -19,15 +19,16 @@ Automated door access system for B-Strong Gym. When a member purchases a members
 
 ## File Map
 
-- `app.py` — Flask app and all webhook route handlers
-- `services.py` — Core business logic (PIN creation, time calculations, autopay)
+- `app.py` — Flask app and all webhook route handlers; instantiates clients at startup (composition root)
+- `services.py` — Core business logic (PIN creation, time calculations, autopay); receives API clients as parameters
 - `database.py` — `Database` class (all Firestore operations)
-- `api_clients.py` — API wrappers for Vagaro and RemoteLock (token caching)
+- `api_clients.py` — `RemoteLockClient` and `VagaroClient` classes with token caching; `PinConflictError` exception; `LOCK_SCHEDULE_ID` constant
 - `config.py` — Secret loading (`Config`, `get_secret`) and business constants (`MEMBERSHIP_DURATIONS`)
 - `utils.py` — Shared utilities: `send_sms`, `send_Dev`, `fix_phone_number`
 - `cloudflare_worker.js` — Cloudflare Worker that proxies Vagaro API calls
 - `Dockerfile` — Cloud Run container definition
 - `requirements.txt` — Python dependencies
+- `requirements-test.txt` — Test dependencies (pytest, freezegun); extends requirements.txt
 
 ## Webhook Endpoints
 
@@ -132,3 +133,51 @@ The Cloudflare Worker (`cloudflare_worker.js`) must be deployed separately to Cl
 - **RemoteLock**: Token cached with 30-second buffer before expiry
 - **Vagaro**: Token cached with 60-second pre-expiry refresh
 - All external API calls use a 10-second timeout
+
+## Code Design
+
+**Dependency Inversion Principle is in place.** High-level modules (`services.py`, `app.py`) do not import low-level API details directly. Instead:
+
+- `RemoteLockClient` (in `api_clients.py`) owns all RemoteLock HTTP calls: `create_access_person`, `grant_lock_access`, `update_pin`, `extend_access`
+- `VagaroClient` (in `api_clients.py`) owns token caching and `get_customer_details`
+- Both are instantiated once in `app.py` and injected as parameters into service functions
+- `services.py` functions accept `rl_client` as a parameter — they never import from `api_clients` directly
+
+**`PinConflictError`** is a custom exception raised by `RemoteLockClient.update_pin()` on HTTP 422 (PIN already in use). Callers handle it explicitly with `except PinConflictError` rather than checking status codes.
+
+**`LOCK_SCHEDULE_ID`** (the RemoteLock access schedule UUID) lives in `api_clients.py` alongside all other RemoteLock constants.
+
+## Logging
+
+All modules use Python's `logging` module (not `print`). The root logger is configured in `app.py` with `logging.basicConfig(level=logging.INFO)`. Each module has a module-level `logger = logging.getLogger(__name__)`.
+
+GCP Cloud Logging automatically picks up severity levels — filter by `ERROR` to see only problems, or search by transaction ID to trace a full purchase end-to-end.
+
+Key values logged at every purchase:
+- Transaction ID (`userPaymentId` or `transactionId`) — logged as soon as it's known
+- RemoteLock time window (`start=... end=...`) — logged before every API call for timezone verification
+- RemoteLock `guest_id` and PIN slot — logged on successful code creation
+
+## Testing
+
+Run the full suite with:
+
+```bash
+pip install -r requirements-test.txt
+python3 -m pytest tests/ -v
+```
+
+**59 tests** across four files:
+
+| File | What it covers |
+|---|---|
+| `tests/test_utils.py` | `fix_phone_number` — all input formats and edge cases |
+| `tests/test_services.py` | Month rollover logic (Jan 31→Feb 28/29, Oct 31→Nov 30, Dec→Jan), time window calculations, `create_door_code` and `extend_remotelock_code` success/failure |
+| `tests/test_routes.py` | All 5 webhook endpoints — auth, happy paths, error paths, day pass vs membership, autopay vs first month |
+
+**SMS behaviour during tests:**
+- Owner numbers (`OWNER_PHONE_NUMBER_1/2`) — silently dropped, never sent
+- Developer (`+17745218808`) — real Twilio call; you will receive texts if a route hits a `send_Dev` path that is not mocked
+- Member phone numbers used in tests — mocked success, no real Twilio call
+
+Unit tests in `test_services.py` patch `send_Dev` explicitly so isolated failures do not text the developer. Route-level tests allow `send_Dev` to pass through so real error scenarios reach you.
