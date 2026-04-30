@@ -62,9 +62,20 @@ class RemoteLockClient:
             "Content-Type": "application/json"
         }
 
+    def _request_with_retry(self, method: str, url: str, **kwargs) -> requests.Response:
+        """Make a RemoteLock HTTP request, retrying once after 2s on network failure."""
+        for attempt in range(2):
+            try:
+                return requests.request(method, url, **kwargs)
+            except requests.exceptions.RequestException as e:
+                if attempt == 1:
+                    raise
+                logger.warning(f"RemoteLock {method.upper()} failed (attempt 1), retrying in 2s: {e}")
+                time.sleep(2)
+
     def create_access_person(self, name: str, starts_at: str, ends_at: str) -> tuple[str, str]:
         """Create a new access guest. Returns (guest_id, pin). Raises on failure."""
-        resp = requests.post(f"{REMOTELOCK_BASE_URL}/access_persons", json={
+        resp = self._request_with_retry('POST', f"{REMOTELOCK_BASE_URL}/access_persons", json={
             "type": "access_guest",
             "attributes": {
                 "name": name,
@@ -72,32 +83,32 @@ class RemoteLockClient:
                 "starts_at": starts_at,
                 "ends_at": ends_at
             }
-        }, headers=self._headers(), timeout=10)
+        }, headers=self._headers(), timeout=15)
         resp.raise_for_status()
         guest = resp.json()["data"]
         return guest["id"], guest["attributes"]["pin"]
 
     def grant_lock_access(self, guest_id: str, lock_id: str) -> None:
         """Grant a guest access to the configured lock. Raises on failure."""
-        resp = requests.post(
-            f"{REMOTELOCK_BASE_URL}/access_persons/{guest_id}/accesses",
+        resp = self._request_with_retry(
+            'POST', f"{REMOTELOCK_BASE_URL}/access_persons/{guest_id}/accesses",
             json={"attributes": {
                 "accessible_id": lock_id,
                 "accessible_type": "lock",
                 "access_schedule_id": LOCK_SCHEDULE_ID
             }},
             headers=self._headers(),
-            timeout=10
+            timeout=15
         )
         resp.raise_for_status()
 
     def update_pin(self, guest_id: str, pin: str) -> None:
         """Update a guest's PIN. Raises PinConflictError on 422, RequestException on other failures."""
-        resp = requests.put(
-            f"{REMOTELOCK_BASE_URL}/access_persons/{guest_id}",
+        resp = self._request_with_retry(
+            'PUT', f"{REMOTELOCK_BASE_URL}/access_persons/{guest_id}",
             json={"attributes": {"pin": pin}},
             headers=self._headers(),
-            timeout=10
+            timeout=15
         )
         if resp.status_code == 422:
             raise PinConflictError(f"PIN {pin} is already in use.")
@@ -105,11 +116,11 @@ class RemoteLockClient:
 
     def extend_access(self, guest_id: str, ends_at: str) -> None:
         """Extend a guest's access end time. Raises on failure."""
-        resp = requests.put(
-            f"{REMOTELOCK_BASE_URL}/access_persons/{guest_id}",
+        resp = self._request_with_retry(
+            'PUT', f"{REMOTELOCK_BASE_URL}/access_persons/{guest_id}",
             json={"attributes": {"ends_at": ends_at}},
             headers=self._headers(),
-            timeout=10
+            timeout=15
         )
         resp.raise_for_status()
 
