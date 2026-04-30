@@ -212,3 +212,34 @@ python3 -m pytest tests/ -v
 - Member phone numbers used in tests — mocked success, no real Twilio call
 
 Unit tests in `test_services.py` patch `send_Dev` explicitly so isolated failures do not text the developer. Route-level tests allow `send_Dev` to pass through so real error scenarios reach you.
+
+## Future Changes
+
+Backlog of improvements identified during code review. None are urgent — the system is running in production. Listed roughly by priority.
+
+### Reliability / correctness
+- **Atomic deduplication for `processed_transactions`** (`app.py:162-167`): The current `checkIfExists` then `add` is two round trips. If Vagaro retries a webhook quickly, both calls can pass the duplicate check and create two RemoteLock codes. Replace with a Firestore transaction or `create()` (which fails if the doc already exists) instead of `set()`.
+- **Explicit final return in `_request_with_retry`** (`api_clients.py:65-74`): Control flow is correct today, but type checkers will flag the implicit `None` return path. Add an explicit `raise RuntimeError("unreachable")` after the loop or restructure.
+- **Fail-fast on missing owner / misc IDs at startup** (`app.py:18-20`): `Owner1`, `Owner2`, and `miscCustomerID` are loaded via `Config.get()` at import time. If Secret Manager is flaky during cold start, those become `None` silently and owner-alert SMS later sends to `None` and fails quietly. Validate at startup and crash if missing.
+
+### Security
+- **Add a shared-secret header to the Cloudflare Worker**: `bstrong-vagaro-proxy.nolantatum6.workers.dev` is publicly callable and proxies real Vagaro credentials. Add an `X-Proxy-Auth` header (or similar) that the Worker validates before forwarding.
+- **Pin or hardcode the Twilio webhook host** (`app.py:319`): `webhook-sms` builds the validation URL from `X-Forwarded-Host`. If anything in front of Cloud Run forwards an attacker-controlled value, signature validation can be bypassed. Hardcode the public host or pull from an env var.
+
+### Build / deploy
+- **Pin dependency versions** (`requirements.txt`): No version pins today. A bad upstream Twilio/Flask release could land in production. Pin to known-good versions or use a lock file. Also verify whether `PyJWT` is actually used and remove if dead.
+- **Remove debug steps from Dockerfile**: `RUN ls -l` and `RUN cat requirements.txt` (lines 11–12) are leftover debugging output. Drop them.
+- **Bump Gunicorn to `--workers 2`**: A single worker means a 32-second RemoteLock retry blocks every other incoming webhook. With 1 vCPU on Cloud Run, 2 workers × 4 threads is a safer default.
+
+### Code quality
+- **Refactor `webhook-transaction`**: ~170 lines of nested logic, hard to read and hard to test. Extract `_resolve_customer(customer_id)`, `_handle_autopay_extension(...)`, and `_handle_first_month_or_one_off(...)` so the route becomes a short orchestrator.
+- **Use `date(...)` instead of `datetime(...).date()`** (`services.py:111`): Minor cleanup — avoids constructing a naive datetime in a timezone-sensitive function.
+
+### Observability
+- **Structured logging**: Switch to `python-json-logger` so Cloud Logging exposes `transaction_id`, `customer_id`, `guest_id` as queryable fields rather than freeform strings.
+- **Request-ID middleware**: Generate a UUID per request and log it on every line. Tracing a single member's flow through the logs becomes trivial.
+- **Add a real `/ready` endpoint**: Current `/health` returns 200 even if Firestore/Twilio/RemoteLock are unreachable. Cloud Run readiness probes are fine as-is, but a separate `/ready` that pings the RemoteLock token endpoint would let an uptime check catch dependency outages.
+
+### Infrastructure
+- **Replace cleanup cron with Firestore TTL policies**: Firestore now supports automatic TTL on a timestamp field. This removes the `/cleanup-firestore` route and the cron that calls it.
+- **End-to-end integration test for `/webhook-transaction`**: Walk form → transaction → SMS with all clients mocked at the HTTP boundary (e.g. `responses` library). Current unit tests are thorough but skip the orchestration layer.
