@@ -24,7 +24,7 @@ DEV_NUMBER    = TEST_CONFIG['DEVELOPER_PHONE_NUMBER']
 
 # Pre-populate Config cache BEFORE importing app so module-level Config.get()
 # calls (Owner1, Owner2, miscCustomerID) never reach Secret Manager.
-from config import Config
+from bstrong.config import Config
 Config._secrets.update(TEST_CONFIG)
 
 # Patch Firestore before importing app to avoid real DB connections.
@@ -48,7 +48,7 @@ def selective_sms():
 
     This ensures the gym owners are never spammed during test runs.
     """
-    from utils import send_sms as _real_send_sms
+    from bstrong.utils import send_sms as _real_send_sms
 
     def guarded(to_phone_number, body, to_phone_number_2=None, **kwargs):
         if to_phone_number in OWNER_NUMBERS:
@@ -59,9 +59,9 @@ def selective_sms():
         # All other numbers (test member phones) — fake success, no real call
         return True
 
-    with patch('utils.send_sms',    guarded), \
-         patch('app.send_sms',      guarded), \
-         patch('services.send_sms', guarded):
+    with patch('bstrong.utils.send_sms',    guarded), \
+         patch('app.send_sms',              guarded), \
+         patch('bstrong.services.send_sms', guarded):
         yield
 
 

@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from freezegun import freeze_time
 from unittest.mock import MagicMock, patch
 
-from services import get_next_month_anniversary, create_door_code, extend_remotelock_code
+from bstrong.services import get_next_month_anniversary, create_door_code, extend_remotelock_code
 
 EST = pytz.timezone('US/Eastern')
 
@@ -63,7 +63,7 @@ class TestCreateDoorCode:
         mock_rl = MagicMock()
         mock_rl.create_access_person.return_value = ('guest-abc', '4321')
 
-        with patch('services.send_sms', return_value=True):
+        with patch('bstrong.services.send_sms', return_value=True):
             success, guest_id = create_door_code(
                 'John', 'Doe', '+15085551234', '1 week pass', mock_rl)
 
@@ -75,7 +75,7 @@ class TestCreateDoorCode:
         mock_rl = MagicMock()
         mock_rl.create_access_person.return_value = ('guest-1', '0000')
 
-        with patch('services.send_sms', return_value=True):
+        with patch('bstrong.services.send_sms', return_value=True):
             create_door_code('John', 'Doe', '+15085551234', '1 week pass', mock_rl)
 
         call_kwargs = mock_rl.create_access_person.call_args.kwargs
@@ -86,7 +86,7 @@ class TestCreateDoorCode:
         mock_rl = MagicMock()
         mock_rl.create_access_person.return_value = ('guest-2', '1111')
 
-        with patch('services.send_sms', return_value=True):
+        with patch('bstrong.services.send_sms', return_value=True):
             create_door_code('John', 'Doe', '+15085551234', 'day pass', mock_rl)
 
         call_kwargs = mock_rl.create_access_person.call_args.kwargs
@@ -100,7 +100,7 @@ class TestCreateDoorCode:
         mock_rl.create_access_person.side_effect = req_lib.exceptions.RequestException("Connection timeout")
 
         # Patch send_Dev so a unit-test RemoteLock failure doesn't text the developer.
-        with patch('services.send_Dev') as mock_dev:
+        with patch('bstrong.services.send_Dev') as mock_dev:
             success, guest_id = create_door_code(
                 'John', 'Doe', '+15085551234', '1 week pass', mock_rl)
 
@@ -113,8 +113,8 @@ class TestCreateDoorCode:
         mock_rl = MagicMock()
         mock_rl.create_access_person.return_value = ('guest-3', '2222')
 
-        with patch('services.send_Dev') as mock_dev, \
-             patch('services.send_sms', return_value=True):
+        with patch('bstrong.services.send_Dev') as mock_dev, \
+             patch('bstrong.services.send_sms', return_value=True):
             create_door_code('John', 'Doe', '+15085551234', 'mystery plan', mock_rl)
 
         mock_dev.assert_called_once()
@@ -125,7 +125,7 @@ class TestCreateDoorCode:
         mock_rl = MagicMock()
         mock_rl.create_access_person.return_value = ('guest-4', '3333')
 
-        with patch('services.send_sms', return_value=True):
+        with patch('bstrong.services.send_sms', return_value=True):
             create_door_code('Jane', 'Smith', '+15085559876', '1 week pass', mock_rl)
 
         mock_rl.grant_lock_access.assert_called_once_with('guest-4', 'test-lock-id')
@@ -135,7 +135,7 @@ class TestCreateDoorCode:
         mock_rl = MagicMock()
         mock_rl.create_access_person.return_value = ('guest-5', '4444')
 
-        with patch('services.send_sms', return_value=True) as mock_sms:
+        with patch('bstrong.services.send_sms', return_value=True) as mock_sms:
             create_door_code('John', 'Doe', '+15085551234', 'day pass', mock_rl)
 
         sms_body = mock_sms.call_args.kwargs['body']
@@ -146,7 +146,7 @@ class TestCreateDoorCode:
         mock_rl = MagicMock()
         mock_rl.create_access_person.return_value = ('guest-6', '5555')
 
-        with patch('services.send_sms', return_value=True) as mock_sms:
+        with patch('bstrong.services.send_sms', return_value=True) as mock_sms:
             create_door_code('John', 'Doe', '+15085551234', '1 week pass', mock_rl)
 
         sms_body = mock_sms.call_args.kwargs['body']
@@ -179,7 +179,7 @@ class TestExtendRemoteLockCode:
         expiry = pytz.utc.localize(datetime(2026, 5, 29, 22, 0))
 
         # Patch send_Dev so a unit-test failure doesn't text the developer.
-        with patch('services.send_Dev') as mock_dev:
+        with patch('bstrong.services.send_Dev') as mock_dev:
             result = extend_remotelock_code('guest-123', expiry, mock_rl)
 
         assert result is False

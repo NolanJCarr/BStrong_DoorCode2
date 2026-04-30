@@ -4,7 +4,7 @@ import requests as req_lib
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
-from api_clients import PinConflictError
+from bstrong.api_clients import PinConflictError
 from tests.conftest import make_firestore_doc, TEST_CONFIG
 
 TRANSACTION_TOKEN = TEST_CONFIG['TRANSACTION_TOKEN']

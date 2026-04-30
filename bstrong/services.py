@@ -1,7 +1,7 @@
 import pytz, requests, calendar, logging
-from config import MEMBERSHIP_DURATIONS, Config
-from utils import send_Dev, send_sms
-from api_clients import RemoteLockClient
+from .config import MEMBERSHIP_DURATIONS, Config
+from .utils import send_Dev, send_sms
+from .api_clients import RemoteLockClient
 from datetime import datetime, timedelta, time
 
 logger = logging.getLogger(__name__)

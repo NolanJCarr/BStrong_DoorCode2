@@ -1,8 +1,8 @@
 import requests, time, logging
 from typing import Any
 from datetime import datetime, timedelta, timezone
-from config import Config
-from utils import send_Dev
+from .config import Config
+from .utils import send_Dev
 
 logger = logging.getLogger(__name__)
 

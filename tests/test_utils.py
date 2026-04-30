@@ -1,5 +1,5 @@
 import pytest
-from utils import fix_phone_number
+from bstrong.utils import fix_phone_number
 
 
 class TestFixPhoneNumber:

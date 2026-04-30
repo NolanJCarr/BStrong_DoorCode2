@@ -1,7 +1,7 @@
 import phonenumbers, logging
 from typing import TypedDict
 from twilio.rest import Client
-from config import Config
+from .config import Config
 
 logger = logging.getLogger(__name__)
 

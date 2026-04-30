@@ -19,16 +19,29 @@ Automated door access system for B-Strong Gym. When a member purchases a members
 
 ## File Map
 
-- `app.py` — Flask app and all webhook route handlers; instantiates clients at startup (composition root)
-- `services.py` — Core business logic (PIN creation, time calculations, autopay); receives API clients as parameters
-- `database.py` — `Database` class (all Firestore operations)
-- `api_clients.py` — `RemoteLockClient` and `VagaroClient` classes with token caching and retry logic; `PinConflictError` exception; `LOCK_SCHEDULE_ID` constant
-- `config.py` — Secret loading (`Config`, `get_secret`) and business constants (`MEMBERSHIP_DURATIONS`)
-- `utils.py` — Shared utilities: `send_sms`, `send_Dev`, `fix_phone_number`; `PhoneResult` TypedDict
-- `cloudflare_worker.js` — Cloudflare Worker that proxies Vagaro API calls
-- `Dockerfile` — Cloud Run container definition (Gunicorn `--timeout 60`)
-- `requirements.txt` — Python dependencies
-- `requirements-test.txt` — Test dependencies (pytest, freezegun); extends requirements.txt
+```
+app.py                        Flask entry point and all webhook route handlers (composition root)
+bstrong/                      Core Python package
+  __init__.py
+  api_clients.py              RemoteLockClient and VagaroClient with token caching and retry logic
+  config.py                   Secret loading (Config, get_secret) and MEMBERSHIP_DURATIONS constants
+  database.py                 Database class — all Firestore operations
+  services.py                 Business logic: PIN creation, time calculations, autopay
+  utils.py                    send_sms, send_Dev, fix_phone_number; PhoneResult TypedDict
+cloudflare/
+  cloudflare_worker.js        Cloudflare Worker that proxies Vagaro API calls
+tests/
+  conftest.py                 Fixtures, test config, SMS routing guards
+  test_api_clients.py         RemoteLockClient retry logic tests
+  test_routes.py              All webhook endpoint tests
+  test_services.py            Time calculation and service function tests
+  test_utils.py               Phone number parsing tests
+Dockerfile                    Cloud Run container (Gunicorn --timeout 60)
+requirements.txt              Python dependencies
+requirements-test.txt         Test dependencies (pytest, freezegun)
+```
+
+`app.py` stays at the root so Gunicorn can find it via `app:app`. All business logic lives in the `bstrong/` package and uses relative imports within the package.
 
 ## Webhook Endpoints
 
@@ -171,6 +184,8 @@ Key values logged at every purchase:
 - RemoteLock time window (`start=... end=...`) — logged before every API call for timezone verification
 - RemoteLock `guest_id` and PIN slot — logged on successful code creation
 - Retry warnings — logged when `_request_with_retry` fires a second attempt
+- `SMS sent to OWNERS (num1 and num2)` — logged whenever both owner numbers are texted (two-number `send_sms` calls always mean owners, never the developer)
+- Member door code change — logged explicitly when a member successfully changes their PIN via the SMS service
 
 ## Testing
 
