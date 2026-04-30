@@ -36,6 +36,7 @@ tests/
   test_routes.py              All webhook endpoint tests
   test_services.py            Time calculation and service function tests
   test_utils.py               Phone number parsing tests
+cloudbuild.yaml               Cloud Build CI/CD: build image → push to Artifact Registry → deploy to Cloud Run
 Dockerfile                    Cloud Run container (Gunicorn --timeout 60)
 requirements.txt              Python dependencies
 requirements-test.txt         Test dependencies (pytest, freezegun)
@@ -136,7 +137,7 @@ python app.py
 ## Deployment (GCP Cloud Run)
 
 ```bash
-gcloud run deploy bstrong-door-code --source . --platform managed --region us-central1 --port 8080
+gcloud run deploy bstrong-webhook-service --source . --platform managed --region us-central1 --port 8080
 ```
 
 The Cloudflare Worker (`cloudflare_worker.js`) must be deployed separately to Cloudflare and configured to proxy Vagaro API requests.
