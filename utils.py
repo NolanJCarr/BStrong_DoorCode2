@@ -35,8 +35,9 @@ def send_sms(
         if to_phone_number_2:
             secondary_sender = from_num if to_phone_number_2.startswith("+1") else "B-STRONG"
             client.messages.create(body=body, from_=secondary_sender, to=to_phone_number_2)
-
-        logger.info(f"SMS sent to {to_phone_number} via {primary_sender}")
+            logger.info(f"SMS sent to OWNERS ({to_phone_number} and {to_phone_number_2})")
+        else:
+            logger.info(f"SMS sent to {to_phone_number} via {primary_sender}")
         return True
 
     except Exception as e:

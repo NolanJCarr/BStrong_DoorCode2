@@ -353,7 +353,7 @@ def smsPinChanges():
     try:
         rl_client.update_pin(remote_lock_id, cleaned_pin)
         send_sms(to_phone_number=from_number, body=f"Door code successfully set to {cleaned_pin}#")
-        logger.info(f"PIN changed to {cleaned_pin} for {from_number}, RemoteLock guest {remote_lock_id}")
+        logger.info(f"Member {from_number} successfully changed their door code to {cleaned_pin} via PIN change service (RemoteLock guest {remote_lock_id})")
         dataBase.delete('pin_change_tickets', from_number)
         return "PIN updated.", 200
 
