@@ -7,14 +7,7 @@ from datetime import datetime, timedelta, time
 logger = logging.getLogger(__name__)
 
 
-def create_door_code(
-    first: str,
-    last: str,
-    phone: str,
-    membership_type: str,
-    rl_client: RemoteLockClient,
-    force_end_utc: datetime | None = None,
-) -> tuple[bool, str | None]:
+def create_door_code(first: str, last: str, phone: str, membership_type: str, rl_client: RemoteLockClient, force_end_utc: datetime | None = None) -> tuple[bool, str | None]:
     lock_id = Config.get("LOCK_ID")
     if not lock_id:
         logger.error("Missing LOCK_ID in config.")

@@ -10,6 +10,7 @@ from google.cloud import firestore
 from twilio.request_validator import RequestValidator
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+logging.getLogger('twilio.http_client').setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
