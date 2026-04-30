@@ -8,7 +8,7 @@ Automated door access system for B-Strong Gym. When a member purchases a members
 
 | Layer | Technology |
 |---|---|
-| Runtime | Python 3.12, Flask, Gunicorn |
+| Runtime | Python 3.12, Flask, Gunicorn (--timeout 60) |
 | Hosting | GCP Cloud Run (containerized) |
 | Database | GCP Firestore (named DB: `bstrong2`) |
 | Secrets | GCP Secret Manager (no `.env` files) |
@@ -22,20 +22,19 @@ Automated door access system for B-Strong Gym. When a member purchases a members
 - `app.py` — Flask app and all webhook route handlers; instantiates clients at startup (composition root)
 - `services.py` — Core business logic (PIN creation, time calculations, autopay); receives API clients as parameters
 - `database.py` — `Database` class (all Firestore operations)
-- `api_clients.py` — `RemoteLockClient` and `VagaroClient` classes with token caching; `PinConflictError` exception; `LOCK_SCHEDULE_ID` constant
+- `api_clients.py` — `RemoteLockClient` and `VagaroClient` classes with token caching and retry logic; `PinConflictError` exception; `LOCK_SCHEDULE_ID` constant
 - `config.py` — Secret loading (`Config`, `get_secret`) and business constants (`MEMBERSHIP_DURATIONS`)
-- `utils.py` — Shared utilities: `send_sms`, `send_Dev`, `fix_phone_number`
+- `utils.py` — Shared utilities: `send_sms`, `send_Dev`, `fix_phone_number`; `PhoneResult` TypedDict
 - `cloudflare_worker.js` — Cloudflare Worker that proxies Vagaro API calls
-- `Dockerfile` — Cloud Run container definition
+- `Dockerfile` — Cloud Run container definition (Gunicorn `--timeout 60`)
 - `requirements.txt` — Python dependencies
 - `requirements-test.txt` — Test dependencies (pytest, freezegun); extends requirements.txt
 
 ## Webhook Endpoints
 
-All endpoints require header-based authentication.
-
-| Endpoint | Trigger | Auth Header |
+| Endpoint | Trigger | Auth |
 |---|---|---|
+| `GET /health` | Cloud Run readiness probe | None |
 | `POST /webhook-form` | Vagaro signup form submission | `X-Vagaro-Signature` |
 | `POST /webhook-transaction` | Vagaro purchase (main flow) | `X-Vagaro-Signature` |
 | `POST /webhook-sms` | Twilio inbound SMS (PIN change) | Twilio signature validation |
@@ -110,6 +109,7 @@ All endpoints require header-based authentication.
 - **Only one Vagaro form ID** is processed; others are ignored
 - **Error vs. data gap**: Technical errors alert the developer; missing customer data alerts the gym owners via SMS
 - **Pre-flight validation**: All customer data must be complete before any RemoteLock call — no orphaned codes
+- **`send_Dev` is guarded**: If `DEVELOPER_PHONE_NUMBER` is missing from Secret Manager, it logs an error and returns `False` rather than crashing
 
 ## Local Development
 
@@ -128,24 +128,37 @@ gcloud run deploy bstrong-door-code --source . --platform managed --region us-ce
 
 The Cloudflare Worker (`cloudflare_worker.js`) must be deployed separately to Cloudflare and configured to proxy Vagaro API requests.
 
-## API Token Caching
+## API Calls & Reliability
 
-- **RemoteLock**: Token cached with 30-second buffer before expiry
-- **Vagaro**: Token cached with 60-second pre-expiry refresh
-- All external API calls use a 10-second timeout
+**Token caching:**
+- RemoteLock: cached with 30-second buffer before expiry
+- Vagaro: cached with 60-second pre-expiry refresh
+
+**RemoteLock timeouts and retry (in `RemoteLockClient`):**
+- All four public methods (`create_access_person`, `grant_lock_access`, `update_pin`, `extend_access`) use a **15-second timeout**
+- On any network-level failure (timeout, connection error), the call is **retried once after a 2-second wait** via `_request_with_retry()`
+- HTTP error responses (e.g. 422 PIN conflict) are **not retried** — they are real responses, not transient failures
+- Worst-case request time: 15s + 2s wait + 15s = 32s, safely within the 60s Gunicorn worker timeout
+- Gunicorn is configured with `--timeout 60` in the Dockerfile for this reason
+
+**Background on the timeout/retry decision**: An April 2026 incident showed RemoteLock's server processing a request successfully after our 10s client timeout fired. The member's code existed in RemoteLock but she never received her PIN SMS. Increasing to 15s + retry prevents this scenario.
+
+**Vagaro API calls:** 10-second timeout, no retry (Vagaro is used as a fallback for customer data only).
 
 ## Code Design
 
-**Dependency Inversion Principle is in place.** High-level modules (`services.py`, `app.py`) do not import low-level API details directly. Instead:
+**Dependency Inversion Principle is in place.** High-level modules (`services.py`, `app.py`) do not depend on low-level HTTP details directly. Instead:
 
 - `RemoteLockClient` (in `api_clients.py`) owns all RemoteLock HTTP calls: `create_access_person`, `grant_lock_access`, `update_pin`, `extend_access`
 - `VagaroClient` (in `api_clients.py`) owns token caching and `get_customer_details`
 - Both are instantiated once in `app.py` and injected as parameters into service functions
-- `services.py` functions accept `rl_client` as a parameter — they never import from `api_clients` directly
+- `services.py` imports `RemoteLockClient` for type annotation only — the concrete instance is always passed in by `app.py`
 
 **`PinConflictError`** is a custom exception raised by `RemoteLockClient.update_pin()` on HTTP 422 (PIN already in use). Callers handle it explicitly with `except PinConflictError` rather than checking status codes.
 
 **`LOCK_SCHEDULE_ID`** (the RemoteLock access schedule UUID) lives in `api_clients.py` alongside all other RemoteLock constants.
+
+**Type hints** are present throughout all six source modules using Python 3.12 native syntax (`str | None`, `tuple[bool, str | None]`, `dict[str, Any]`, etc.). `utils.py` exports a `PhoneResult` TypedDict for the return shape of `fix_phone_number`.
 
 ## Logging
 
@@ -157,6 +170,7 @@ Key values logged at every purchase:
 - Transaction ID (`userPaymentId` or `transactionId`) — logged as soon as it's known
 - RemoteLock time window (`start=... end=...`) — logged before every API call for timezone verification
 - RemoteLock `guest_id` and PIN slot — logged on successful code creation
+- Retry warnings — logged when `_request_with_retry` fires a second attempt
 
 ## Testing
 
@@ -167,13 +181,14 @@ pip install -r requirements-test.txt
 python3 -m pytest tests/ -v
 ```
 
-**59 tests** across four files:
+**77 tests** across four files:
 
 | File | What it covers |
 |---|---|
+| `tests/test_api_clients.py` | `RemoteLockClient` retry logic — success with no retry, retry on ReadTimeout, retry on ConnectionError, both attempts failing, exactly one retry ever fired, 15s timeout enforced, 422 not retried |
 | `tests/test_utils.py` | `fix_phone_number` — all input formats and edge cases |
 | `tests/test_services.py` | Month rollover logic (Jan 31→Feb 28/29, Oct 31→Nov 30, Dec→Jan), time window calculations, `create_door_code` and `extend_remotelock_code` success/failure |
-| `tests/test_routes.py` | All 5 webhook endpoints — auth, happy paths, error paths, day pass vs membership, autopay vs first month |
+| `tests/test_routes.py` | All 6 endpoints (`/health` included) — auth, happy paths, error paths, day pass vs membership, autopay vs first month |
 
 **SMS behaviour during tests:**
 - Owner numbers (`OWNER_PHONE_NUMBER_1/2`) — silently dropped, never sent
