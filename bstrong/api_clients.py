@@ -150,7 +150,7 @@ class VagaroClient:
             return self._token
 
         except requests.exceptions.RequestException as e:
-            error_text = e.response.text if hasattr(e, 'response') and e.response else str(e)
+            error_text = e.response.text if hasattr(e, 'response') and e.response is not None else str(e)
             logger.error(f"Error getting Vagaro token via Worker: {error_text}")
             send_Dev(f"Could not refresh Vagaro token: {error_text}")
             return None
@@ -175,7 +175,7 @@ class VagaroClient:
             resp.raise_for_status()
             return resp.json().get("data")
         except requests.exceptions.RequestException as e:
-            error_text = e.response.text if hasattr(e, 'response') and e.response else str(e)
+            error_text = e.response.text if hasattr(e, 'response') and e.response is not None else str(e)
             logger.error(f"Vagaro API error fetching customer {cust_id}: {error_text}")
             send_Dev(f"STOP GUESSING. VAGARO SAID: {error_text}")
             return None

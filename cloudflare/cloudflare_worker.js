@@ -7,7 +7,8 @@ export default {
       
       const authPayload = {
         clientId: env.VAGARO_CLIENT_ID,
-        clientSecretKey: env.VAGARO_CLIENT_SECRET
+        clientSecretKey: env.VAGARO_CLIENT_SECRET,
+        scope: request.headers.get("X-Scope") || request.headers.get("x-scope") || "read access"
       };
 
       let finalBody = null;
